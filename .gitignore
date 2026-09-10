@@ -1,0 +1,14 @@
+.claude/settings.local.json
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+data/
+node_modules/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+web/dist/

@@ -1,0 +1,20 @@
+{
+  "name": "AI Study Planner",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12-bookworm",
+  "features": {
+    // A minimal Linux desktop (Fluxbox) served over noVNC on port 6080.
+    // Lets `asp login` open a real browser you view in a browser tab, so
+    // the Microsoft SSO login happens inside the Codespace and your
+    // device's extension/DevTools restrictions don't apply.
+    "ghcr.io/devcontainers/features/desktop-lite:1": {},
+    // For the React frontend in later build steps.
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" }
+  },
+  "forwardPorts": [6080],
+  "portsAttributes": {
+    "6080": { "label": "Desktop (noVNC)", "onAutoForward": "silent" }
+  },
+  "remoteEnv": { "DISPLAY": ":1" },
+  "postCreateCommand": "pip install -e '.[dev]' && python -m playwright install --with-deps chromium",
+  "remoteUser": "vscode"
+}
