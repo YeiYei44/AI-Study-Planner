@@ -9,10 +9,24 @@ architecture and rationale.
 
 ## Status
 
-**Step 1: Canvas session + API client.** No Canvas token is available for
-this account, so ingestion runs through a logged-in browser session
-(Playwright + a persistent profile). Steps 2–6 (SQLite store, scheduler,
-LLM estimation, tutor, spaced review) are not built yet.
+**Steps 1–5 done: Canvas session + API client, normalize + SQLite +
+diffing, deterministic scheduler, LLM estimation + calibration, the
+tutor.** No Canvas token is available for this account, so ingestion
+runs through a logged-in browser session (Playwright + a persistent
+profile). `sync` pulls courses and assignments, stores them in SQLite,
+and reports what changed since last time. `plan` turns that into an
+actual calendar: effort estimates (via `estimate-llm` — Groq by default,
+cached per assignment and falling back to a heuristic until estimated)
+scheduled backward from due dates into your weekly availability. `log`
+records what things actually took, and `calibration` learns a real
+per-type pace multiplier from that — applied automatically, never
+overriding an `estimate` you set by hand. `material add` extracts,
+chunks, and embeds your own files (syllabi, slides, notes — Canvas alone
+never covered lecture content); `ask` answers questions grounded only in
+what you've uploaded, with citations, and says so plainly when your
+materials don't cover something rather than guessing. Verified against a
+real account, real assignments, and real files — not just unit tests.
+Step 6 (spaced review) is not built yet.
 
 ## Setup
 
@@ -37,17 +51,111 @@ script/executable, just the Python interpreter running a module.
 exactly what endpoint security on a managed device tends to flag.)
 
 ```bash
-python -m app.cli login     # opens a real browser — sign in with your Fulton/Microsoft account
-python -m app.cli whoami    # check the stored session is still valid
-python -m app.cli sync      # pull courses + assignments, print a summary, save a raw snapshot
+python -m app.cli login       # opens a real browser — sign in with your Fulton/Microsoft account
+python -m app.cli whoami      # check the stored session is still valid
+python -m app.cli sync        # pull, store in SQLite (data/planner.db), report what changed
+python -m app.cli assignments # list what's stored, soonest due first (--all for everything)
+
+# planning, once you've synced at least once:
+python -m app.cli availability --add "mon-fri 16:00-19:00"   # weekly template; repeatable
+python -m app.cli estimate <assignment_id> <minutes>          # override the default guess
+python -m app.cli estimate-llm                                # estimate the rest via Claude
+python -m app.cli plan                                        # generate/regenerate the plan
+
+# after you actually study:
+python -m app.cli log <assignment_id> <minutes>   # what it actually took
+python -m app.cli calibration                     # see the learned pace multipliers
 ```
 
 `login` needs a real display, so run it on your own machine. It stores
 the session under `data/browser-profile/`; `whoami` and `sync` then run
 headless against that. When the session expires, `login` again.
 
-`sync` writes raw JSON to `data/raw/<timestamp>/` — that's the input for
-step 2.
+`plan` schedules backward from each assignment's due date (minus a 12h
+safety margin) into your availability, highest-priority first
+(points ÷ days-until-due), in fixed 45-minute blocks with one buffer
+block reserved per available day. Re-running it replaces the open plan;
+anything you've locked or marked complete is left alone. If it can't fit
+an assignment in before its deadline given everything else, it says so
+rather than silently dropping it.
+
+`estimate-llm` needs a backend configured — `ASP_LLM_BACKEND` picks
+which, see `.env.example` for each one's settings:
+
+- **`claude`** (default) — highest quality, costs money. Haiku 4.5 by
+  default (`ASP_LLM_ESTIMATE_MODEL` to change it) — effort estimation
+  from a short description is a simple, high-volume, low-stakes call,
+  not the tier the tutor will need later.
+- **`openai_compat`** — any OpenAI-compatible endpoint: **Groq**
+  (recommended — free key at console.groq.com, fast, generous daily
+  limits), Mistral's La Plateforme, OpenRouter, GitHub Models, or a local
+  Ollama server if you'd rather run that than the option below.
+- **`local`** — fully offline via `llama-cpp-python`
+  (`pip install -e ".[local]"`) against a local `.gguf` file (an
+  8B-class instruct model). No network at all, so it runs directly on a
+  restricted device with no Codespace and no question of which domains
+  are reachable.
+
+Whichever backend, `estimate-llm` skips anything you've set yourself and
+anything already estimated since it last changed, so it's cheap to
+re-run after every `sync`. It retries automatically on rate limiting
+(exponential backoff) and on the occasional malformed response smaller
+free models sometimes produce (a quick immediate retry) — verified
+end-to-end against Groq's free tier: 112/112 real assignments estimated,
+0 errors, after finding and fixing exactly these issues against
+production data (see `docs/DESIGN.md`).
+
+### Tutor
+
+```bash
+python -m app.cli material add notes.pdf --title "Unit 3 Slides" --kind slides --course 12345
+python -m app.cli material list
+python -m app.cli ask "What's the difference between ionic and covalent bonds?"
+```
+
+`material add` accepts `.pdf`, `.pptx`, `.docx`, `.txt`, and `.md` —
+extracts text per page/slide (or per ~15-paragraph section for `.docx`,
+which has no stored page concept at all), chunks it (~800 chars, ~100
+overlap, never across a page/slide boundary — that would point a
+citation at the wrong page), and embeds every chunk locally via
+`fastembed` (no torch, ~67MB model, downloaded once on first use — this
+step is always local and free no matter which `ASP_LLM_BACKEND` answers
+questions, since Groq itself has no embeddings endpoint at all). `--course`
+and `--kind` are optional.
+
+`ask` retrieves the most relevant chunks — hybrid search, not embeddings
+alone: dense (cosine similarity, brute-force, plenty fast at a personal
+corpus's scale) plus lexical (SQLite's built-in FTS5, zero new
+dependencies), merged by Reciprocal Rank Fusion. Found necessary against
+real uploaded content, not added speculatively: a small embedding model
+alone ranked the chunk containing "Document 3" 16th of 19 for a question
+asking specifically about document 3, because dense embeddings are weak
+at exact/numbered references — the "3" gets diluted into an average
+against generic words repeated in every chunk. Fixed and re-verified
+against that same real material (see `docs/DESIGN.md` for the full
+debugging trail). It's *reliable*, not *guaranteed* — a document with
+many more short numbered items than were tested here could still see one
+narrowly miss the cutoff; structure-aware chunking (splitting on detected
+"Document N"-style headers) would close that gap further but isn't built.
+
+`ask` answers using only the retrieved context, citing sources by title
+and page/slide. If your materials don't cover the question, it says so
+rather than answering from the model's own training knowledge — verified
+directly: asked something absent from the test materials and got an
+explicit "the excerpts don't include that" instead of a plausible-sounding
+guess.
+
+`log` records actual time against an assignment and marks its open
+scheduled blocks done. Once a submission type (Canvas's own
+categorization — quiz, upload, discussion, etc.) has 3+ logged sessions,
+`calibration` starts applying that type's real actual÷estimated ratio to
+future estimates of the same type — automatically, everywhere an
+estimate is read, without needing to regenerate anything by hand. A
+manual `estimate` override is never adjusted by this.
+
+`sync` also writes a raw JSON snapshot to `data/raw/<timestamp>/` on each
+run — the untouched API response, kept alongside the normalized SQLite
+rows for debugging and as the audit trail behind the diff.
 
 ### Headless box / Codespace
 
@@ -138,7 +246,32 @@ app/
     session.py         CanvasSession (headless) + interactive_login + install_cookies
     cookies.py         parse cookie header / curl / JSON export into Playwright cookies
     canvas.py          CanvasClient — pagination, rate limiting, endpoints
-  cli.py               login / login-cdp / export-cookies / import-cookies / whoami / sync
+    normalize.py       raw Canvas JSON -> canonical row dicts
+  db/
+    schema.py          SQLite DDL (courses, assignments, sync_runs,
+                        availability, estimates, plan_blocks, sessions)
+    connection.py       connect() — WAL, schema bootstrap, column migrations,
+                        chunks_fts (FTS5 hybrid-search index, auto-synced)
+    sync.py            diff-then-upsert; returns what changed
+    sessions.py         log_session() — actual time + mark blocks done
+  planner/
+    availability.py    weekly template + "mon-fri 16:00-19:00" parsing
+    estimate.py        estimate priority chain (user > llm > default) + calibration
+    llm_estimate.py     backend-agnostic caching + bulk-run orchestration
+    llm_backends/        claude.py, openai_compat.py, local_llamacpp.py — pluggable,
+                          each implementing estimate() and answer()
+    calibration.py      live per-submission-type actual÷estimate multiplier
+    schedule.py         generate_plan() — backward-fill into availability
+  tutor/
+    extract.py         per-format text extraction (pdf/pptx/docx/txt/md)
+    chunk.py           chunk_text() — overlapping, word-boundary-safe
+    embed.py           local embeddings (fastembed, no torch)
+    materials.py        add_material() — extract -> chunk -> embed -> store
+    qa.py              retrieve() + ask() — cited Q&A, no answer without a source
+  cli.py               login / login-cdp / export-cookies / import-cookies /
+                        whoami / sync / assignments / availability /
+                        estimate / estimate-llm / plan / log / calibration /
+                        material add / material list / ask
 docs/DESIGN.md         architecture and decisions
 tests/
 ```

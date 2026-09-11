@@ -387,39 +387,447 @@ planner on top.
 
 ---
 
-## 11. Step 1 status
+## 11. Status
 
-Done:
+**Step 1 (session + API client) and step 2 (normalize + SQLite + diffing)
+are both done**, verified against a real, live Fulton account — not just
+synthetic tests. `python -m app.cli login-cdp` on the school device
+survived (Conditional Access turned out to be network/location-scoped,
+not browser-scoped, so a local sign-in cleared it), and `sync` pulled the
+user's actual courses and assignments: 13 courses, 112 assignments, real
+due dates and point values, stored in SQLite and confirmed via
+`assignments`. First real end-to-end proof the whole ingestion side
+works, after several rounds of environment-specific blockers (Conditional
+Access, a killed Playwright browser, an AV-flagged CLI wrapper, a
+session-cookie persistence bug) that are all resolved and documented
+above.
+
+Built:
 - `.devcontainer/` — Codespace image + `desktop-lite` (noVNC) + node
 - `app/config.py` — env-driven settings (`ASP_` prefix)
 - `app/ingest/session.py` — `CanvasSession` (headless, auth-checked),
-  `interactive_login()` (headed, poll-to-success, `NoDisplayError` guard),
-  `install_cookies()` (no-display fallback)
+  `interactive_login()` (headed), `install_cookies()`, `login_via_cdp()`
+  (self-launched-or-attached Chromium over CDP)
 - `app/ingest/cookies.py` — parse Cookie header / curl / JSON export
 - `app/ingest/canvas.py` — `CanvasClient`: pagination, rate-limit
   handling, `courses()` / `assignments()` / `all_assignments()`
-- `app/cli.py` — `python -m app.cli login` / `login-cdp` / `export-cookies` /
-  `import-cookies` / `whoami` / `sync`
-- `sync` writes raw JSON snapshots to `data/raw/<timestamp>/`
+- `app/ingest/normalize.py` — raw Canvas JSON -> canonical row dicts
+- `app/db/schema.py`, `app/db/connection.py` — SQLite (WAL), `courses` /
+  `assignments` / `sync_runs`, Canvas's own ids as primary keys for now
+- `app/db/sync.py` — diff-then-upsert; a `Change` per new/removed
+  assignment or changed due date/points/name
+- `app/cli.py` — `login` / `login-cdp` / `export-cookies` /
+  `import-cookies` / `whoami` / `sync` (now persists to SQLite and
+  reports changes) / `assignments` (queries the store, soonest due first)
 
-Verified in Codespace: headless launch, auth check returns
-not-authenticated for an empty profile; header/curl/JSON cookie parsing
-(9 tests); the export -> import round trip (Playwright's own cookie
-shape, injected, re-checked) works end to end; CLI degrades cleanly
-everywhere (no tracebacks). Verified against a real locally-launched
-Chromium: `login_via_cdp` connects, polls, detects a successful sign-in
-via a mock Canvas server, exports cookies, exits 0, and leaves the
-browser process running afterward; a dead debugging port fails cleanly
-with no traceback.
+Verified: everything from earlier sections, plus — a real sync against
+the live account (13 courses, 112 assignments, all correctly reported
+`new` on first write); `assignments` correctly joins and sorts real
+upcoming due dates; 20 tests passing including normalize and diff-upsert
+coverage (new/due-changed/points-changed/name-changed/removed-but-not-
+deleted, all against a real SQLite connection via `tmp_path`, not mocks).
 
-Not yet verified: a real Fulton session and a live pull. Blocked so far
-by Conditional Access on every sign-in attempted from the Codespace, and
-then by the local Windows browser closing itself before `login-cdp`
-existed to work around it (see above). Currently trying: `python -m app.cli login-cdp`
-against a manually-launched Chromium on the school device.
+Known gap: a failed `sync` (e.g. expired session) doesn't get a
+`sync_runs` row — only successes are recorded. Minor, fine to pick up
+later.
 
-Next, depending how that goes: either `python -m app.cli login-cdp` locally ->
-`python -m app.cli import-cookies` here -> `python -m app.cli sync`, confirm pagination against a
-course with 100+ assignments, then step 2 (normalize + SQLite) — or, if
-that hits the same Conditional Access wall, pivot straight to the ICS
-adapter + manual upload as the primary ingestion path instead.
+**Step 3 (deterministic scheduler) is also done.** v1 scope, stated
+plainly in `app/planner/schedule.py`'s docstring: fixed 45-minute blocks
+rather than variable-length slicing, one reserved buffer block/day rather
+than a percentage, a weekly availability template only (no blackout
+dates yet), and a regenerated plan doesn't yet subtract time already
+covered by locked/completed blocks from what's still needed (harmless
+while nothing is locked/completed yet — needs fixing once blocks can be
+marked done). None of these are secret shortcuts; all four are called out
+in the code and here.
+
+Built:
+- `app/db/schema.py` — added `availability`, `estimates`, `plan_blocks`
+- `app/planner/availability.py` — weekly template; `parse_availability_spec`
+  turns `"mon-fri 16:00-19:00"` into per-day rows, day-range wraparound
+  included (`"fri-mon ..."` spans the weekend correctly)
+- `app/planner/estimate.py` — `default_minutes()` heuristic (placeholder
+  until step 4's LLM estimation), overridden by a hand-entered
+  `set_estimate(basis='user')` when one exists
+- `app/planner/schedule.py` — `generate_plan()`: priority = points /
+  days-until-due, greedy backward-fill from today into the deadline day
+  (due minus a 12h safety margin), reports `shortfalls` when there isn't
+  enough room; `write_plan()` replaces the open (unlocked, incomplete)
+  plan, leaves locked/completed rows alone
+- `app/cli.py` — `availability` / `estimate` / `plan`; `assignments` now
+  shows the `id` column `estimate` needs
+
+Verified against the real synced data (112 real assignments, not
+synthetic): `plan` correctly built a full backward-scheduled calendar —
+e.g. "Periodic Trend Puzzles" (due 9/14) got 3 blocks ending 9/12,
+"Current Events Rough Draft" (due 9/29) got blocks starting 9/18; buffer
+blocks landed on every available day; `estimate 2682052 120` dropped that
+assignment's block count from 6 (the default heuristic's 240min, clamped
+to its max) to 3 (⌈120/45⌉) — confirming the override actually reaches
+the scheduler, not just gets stored. It also correctly reported
+real shortfalls ("week 6 practice — short 90 min") when lower-priority
+assignments didn't fit before their deadline given the availability set —
+exactly the honest signal this was designed to produce, not a bug.
+
+Also caught and fixed a real bug via testing, not just theory: an early
+version of `generate_plan` accepted an overridable `today` for tests but
+always computed its due-date liveness cutoff from the real wall clock,
+so the two could silently disagree (fine in production, where both
+default together, but would have meant a subtly wrong result the moment
+anyone ever passed a deliberately different `today`). Fixed by deriving
+`today` from a single `now` parameter instead of each defaulting
+independently. 38 tests passing.
+
+**Step 4 (LLM effort estimation + time logging + calibration) is done.**
+
+Model choice: Haiku 4.5 (`ASP_LLM_ESTIMATE_MODEL`), deliberately, not
+Sonnet — estimating minutes from a short description is a simple,
+high-volume (112 assignments today), low-stakes judgment call, the
+textbook case for a cheap/fast model. The tutor (step 5) is a different
+kind of task — actual pedagogical reasoning — and should use a
+Sonnet-tier model instead. Stated here so the distinction is a decision,
+not an inconsistency someone finds later.
+
+Built:
+- `app/db/schema.py` — `sessions` table; `estimates` gains `minutes_p80`,
+  `content_hash` via `app/db/connection.py`'s new guarded-`ALTER TABLE`
+  migration helper (no framework yet — young enough that this is more
+  honest than pretending we need Alembic). Verified against the real
+  database: the existing `basis='user'` row from step 3 survived the
+  migration with its value intact, new columns added as NULL.
+- `app/planner/llm_estimate.py` — `run_llm_estimates()`: async, bounded
+  concurrency (`ASP_LLM_ESTIMATE_MAX_CONCURRENCY`, same pattern as
+  `CanvasClient`) — sequential would mean minutes for 100+ assignments.
+  A Claude tool-use call (`report_estimate`, forced via `tool_choice`)
+  returns p50/p80 minutes as structured output rather than parsed free
+  text. Caching: `content_hash()` over name/description/points/
+  submission_types — unchanged assignments are skipped entirely on
+  re-run, `basis='user'` rows are never touched regardless of hash.
+- `app/planner/calibration.py` — `get_multiplier()`: live-computed
+  (queried fresh from `sessions` every call, not stored — cheap at this
+  scale, sidesteps a staleness question entirely) actual÷estimate ratio
+  per Canvas `submission_type` (steadier signal than course subject,
+  which is free text). Needs 3+ samples of a type before it's applied;
+  cold start returns 1.0 (no adjustment). Averaged across an assignment's
+  types when it has more than one.
+- `app/planner/estimate.py` — `get_estimate_minutes()` now: `basis='user'`
+  returns unmodified and un-calibrated (an override is permanent until
+  the user changes it themselves); otherwise the stored (llm or default)
+  base is multiplied by the live calibration factor. `default_minutes()`
+  itself stays fixed and uncalibrated on purpose — it's also the baseline
+  `estimated_minutes_at_log` is compared against, so calibration can't
+  compound on its own output across repeated recomputation.
+- `app/db/sessions.py` — `log_session()`: records actual time, captures
+  `estimated_minutes_at_log` from the fixed heuristic (never the LLM or
+  calibrated figure, for the same anti-compounding reason), and marks
+  that assignment's open (`locked=0, completed=0`) plan_blocks completed
+  so a later `plan` doesn't re-offer time already spent. Extracted into
+  its own module rather than left inline in the CLI, matching how every
+  other command already delegates to `db/`/`planner/` — the earlier
+  inline version wasn't covered by tests; this is.
+- `app/cli.py` — `estimate-llm` (lazy `import anthropic`, so commands
+  that don't touch the LLM never require the package or a key), `log`,
+  `calibration`. `assignments` gained an `id` column — needed once
+  `estimate`/`log` require one and there was previously no way to see it.
+
+Verified against the real synced data: `log` against three real Hons
+Chem assignments (different submission types) correctly required 3
+same-type samples before applying — `on_paper` sat at "needs 2 more"
+while `online_upload` reached 3 and flipped to applied; a real, previously
+un-estimated `online_upload` assignment's effective estimate came back at
+exactly 50 × 0.50 = 25 minutes, confirming the multiplier actually reaches
+`get_estimate_minutes()` and not just the display table; the existing
+`basis='user'` estimate (120 min) stayed exactly 120 after all of this,
+confirming the override truly is immune. 19 new tests (57 total) —
+`run_llm_estimates()`'s caching/skip/error logic tested against a fake
+`AsyncAnthropic` client, no network calls.
+
+Known gaps, stated plainly: `estimate-llm` estimates the *whole
+horizon's* published assignments on every run, not just ones near their
+due date — fine at 112 assignments and Haiku pricing, would need scoping
+(e.g. only assignments due within N days) at real scale. Calibration
+groups by submission_type only, and for a multi-type assignment `log`
+attributes the whole session to just its first listed type — a v1
+simplification, not a correctness claim about mixed-type work.
+
+**Estimation backends made pluggable — cost, not access, was the driver
+this time.** Unlike every other environment obstacle in this doc, this
+one had nothing to do with the school device: `estimate-llm` runs from
+wherever the CLI runs (the Codespace has unrestricted internet — the
+blocking has only ever affected things that specifically needed a
+trusted browser session on the school device itself, like Canvas login).
+The reason to avoid Claude here is purely that paying for API access
+isn't worth it yet at this project's stage. Refactored
+`app/planner/llm_backends/` into three interchangeable backends behind
+one `estimate(course_name, assignment_row, types) -> (p50, p80)` shape,
+selected by `ASP_LLM_BACKEND`:
+
+- `claude.py` — unchanged logic, just moved. Still the natural choice
+  once the project's ready to spend, and likely still what the tutor
+  (step 5, a harder task) will want regardless of what estimation uses.
+- `openai_compat.py` — one implementation for *any* OpenAI-compatible
+  chat-completions endpoint (same `tools`/`tool_choice` wire format):
+  Groq (default recommendation — free tier is genuinely generous,
+  thousands of req/day on an 8B model, fast LPU inference), Mistral,
+  OpenRouter, GitHub Models, or a local Ollama server. One backend, many
+  providers, config-only to switch.
+- `local_llamacpp.py` — fully offline via `llama-cpp-python` against a
+  local `.gguf` file. **Deliberately not Ollama**, despite Ollama's
+  nicer tool-calling ergonomics and being usable via the same
+  `openai_compat` backend: Ollama ships as a new standalone binary plus
+  a background server process, and this device has already killed or
+  flagged *every* new executable handed to it this project (Playwright's
+  Chromium, the `asp.exe` console-script wrapper). `llama-cpp-python` is
+  a Python package with a compiled extension, loaded in-process by the
+  same python.exe already trusted here — nothing new to flag. Uses
+  `response_format={"type": "json_object", "schema": ...}`, which
+  llama-cpp-python compiles into a GBNF grammar and enforces at the
+  sampler level — genuinely guaranteed-valid JSON, not just usually
+  valid. Optional dependency (`pip install -e ".[local]"`) — heavy,
+  compiled, platform-specific, shouldn't be forced on an environment
+  that isn't doing local inference (the Codespace never needs it).
+
+Shared prompt/schema logic (`llm_backends/schema.py`) is defined once so
+the three integrations can't quietly drift out of sync with each other.
+`llm_estimate.py`'s caching/orchestration layer is now fully
+backend-agnostic — it holds an object with an `estimate()` method and
+doesn't know or care which backend built it. Testing got easier, not
+harder, from this: `run_llm_estimates()`'s tests now inject a trivial
+fake backend directly rather than monkeypatching the Anthropic SDK's
+internals; each real backend gets its own focused wire-format test
+against a fake SDK client. 13 new/changed tests, 70 total.
+
+**Also found and fixed while building this: a real Rich-markup
+corruption bug**, unrelated to the backend work but caught by it — an
+error message containing literal `.[local]"` silently lost that
+substring when printed. Rich's console markup treats any `[lowercase
+word]` span as an attempted style tag; an unrecognized one doesn't
+raise, it just swallows text up to the next `[/]`. Reproduced
+deliberately: `console.print(f"[green]{'Homework [optional]'}[/]")`
+prints only `"Homework"`. This is a live risk anywhere Canvas-sourced
+text (assignment/course names, which plausibly contain bracketed
+annotations like "[optional]") reaches a `console.print` or
+`Table.add_row` call un-escaped — not hypothetical, just not yet hit by
+this account's actual data (checked). Fixed by wrapping every dynamic
+interpolation that could carry exception text or Canvas-sourced names
+with `rich.markup.escape` throughout `cli.py`, and verified against a
+synthetic bracketed name end-to-end through the real `assignments`
+command.
+
+**First real Groq run against production data, and three more real bugs
+it surfaced.** The user chose `openai_compat`/Groq over paying for
+Claude at this stage. Running `estimate-llm` against all 112 real
+assignments (not synthetic tests) found, in order:
+
+1. **Wrong model name.** `llama-3.1-8b-instant` — the model recommended
+   in this doc's own earlier write-up — no longer exists on Groq;
+   deprecated June 2026. Confirmed live against Groq's `/models`
+   endpoint (via the SDK client, not raw `urllib` — that got a bare 403,
+   most likely Cloudflare-level bot protection on a request the SDK's
+   own headers avoid) rather than trusting search results a second time.
+   Replaced with `openai/gpt-oss-20b`, Groq's own migration
+   recommendation, confirmed working.
+2. **Truncated JSON at `max_tokens=300`.** A verbose model's `reasoning`
+   field (present in the schema, never actually persisted downstream)
+   ran the response past the token budget and cut off mid-object,
+   breaking the parse. Fixed at the source — tightened the schema's
+   guidance to "at most 12 words" — and with a safety margin regardless
+   (300 -> 500/400 across all three backends, not just the one that hit
+   it; Claude or a local model could plausibly hit the same wall with a
+   sufficiently verbose response).
+3. **Real rate limiting under bulk concurrency (57/106 failing).**
+   Confirmed via `openai.RateLimitError`, HTTP 429, a Groq free-tier TPM
+   cap — invisible at `--limit 5`, unmissable at full scale. Added
+   retry-with-exponential-backoff in `run_llm_estimates`'s worker
+   (`_is_rate_limited` checks `.status_code == 429`, works for both the
+   Anthropic and OpenAI SDKs' error classes without needing to import
+   either type-specifically) — the same shape `CanvasClient` already
+   uses for Canvas's own rate limiting, extended to the LLM side.
+4. **Intermittent malformed tool calls, unrelated to token budget.**
+   Even after fix #2, isolated re-tests of the same exact prompt against
+   the same assignment succeeded most of the time and occasionally
+   failed differently each time (once truncated-looking, once "model did
+   not call a tool" with an empty generation) — confirmed genuinely
+   stochastic, not content-triggered, by rerunning the identical request
+   three times in a row and getting two different outcomes. A smaller
+   free model doesn't hit forced `tool_choice` 100% of the time. Added a
+   second, smaller retry tier for non-rate-limit failures
+   (`_MAX_RETRIES_OTHER`, no backoff delay — waiting doesn't make a
+   model more careful) sitting alongside the rate-limit tier
+   (`_MAX_RETRIES_RATE_LIMIT`, full exponential backoff). Started at 2,
+   watched it still fail twice in a row for one assignment across two
+   full runs, re-tested that exact assignment 3 more times fresh and
+   watched it succeed twice and fail once — confirmed a real per-attempt
+   failure rate worth budgeting for, not a fluke — and moved it to 3.
+   Final result: 112/112 published assignments estimated, 0 errors.
+
+Also fixed along the way, unprompted: a real Groq API key got pasted
+directly into `.env.example` — the *template* file, meant to be
+committed with placeholders only, not the gitignored `.env` — while
+testing config values in the editor. Caught before anything was staged
+or committed (confirmed via `git log --all -p | grep`, not just
+assumed), so this was a same-turn fix rather than a repeat of the
+cookie-file incident: moved the real key to `.env`, restored
+`.env.example` to placeholders, verified `.env` is actually gitignored
+and that Settings still loads the real value correctly.
+
+**Step 5 (the tutor) is done — its core slice.** Materials, chunking,
+embedding, and cited Q&A over manually-uploaded content, since Canvas
+access alone was never going to cover lecture content.
+
+Built:
+- `app/db/schema.py` — `materials` (course_id nullable — not everything
+  ties to one course) and `chunks` (`ord`, `text`, `page_ref` for
+  citation, `embedding` as a little-endian float32 BLOB)
+- `app/tutor/extract.py` — `.pdf` (pypdf, one section per page),
+  `.pptx` (python-pptx, one section per slide — the natural fit for
+  "Lecture 7, slide 12"-style citations), `.docx` (python-docx; docx
+  has no stored page concept at all — pagination is a rendering detail,
+  not in the file — so paragraphs are grouped into fixed-size
+  "section N" units instead of faking page numbers), `.txt`/`.md`
+- `app/tutor/chunk.py` — `chunk_text()`: ~800-char chunks with ~100-char
+  overlap, chunked *within* each section (never across a page/slide
+  boundary, or a citation would point at the wrong page for text near
+  the seam)
+- `app/tutor/embed.py` — `fastembed` (ONNX runtime, no torch —
+  `BAAI/bge-small-en-v1.5`, 384-dim, ~67MB, lazy-downloaded on first
+  use). Always local and free regardless of which chat backend answers
+  questions: Groq (this project's chat backend) has no embeddings
+  endpoint at all, and embedding is cheap enough on CPU to never need a
+  paid API for it. Verified directly: loads in ~2.5s, embeds in
+  milliseconds, and correctly ranked semantically related sentences
+  above unrelated ones before any production code was written around it
+- `app/tutor/materials.py`, `app/tutor/qa.py` — `add_material()`
+  (extract → chunk → embed → store); `retrieve()` (brute-force cosine
+  similarity over stored chunks — fine at personal-corpus scale, no
+  vector DB needed) and `ask()`, which builds a prompt requiring
+  citations and an explicit "not covered" rather than a guess — see
+  §8's stated rule: a tutor that invents course specifics the night
+  before an exam is worse than no tutor
+- `app/planner/llm_estimate.py`'s `make_backend()` gained a `tutor=True`
+  flag: Claude backend picks `llm_tutor_model` (Sonnet, default) instead
+  of `llm_estimate_model` (Haiku); openai_compat picks
+  `openai_compat_tutor_model` if set, else reuses the estimation model.
+  Same three backends as step 4, now each also implementing `answer()`
+  — free-form completion, no forced tool schema, alongside `estimate()`
+- `app/cli.py` — `material add` / `material list` / `ask`
+
+Verified end-to-end against real files and the real Groq backend, not
+just unit tests: ingested a `.txt`, a `.docx`, and a `.pptx` (each
+generated for real, not mocked), confirmed extraction produced correct
+per-format citations (`section N` for docx, `slide N` for pptx), then
+asked three real questions through Groq — one answered correctly with
+the right source ranked highest by cosine similarity, one correctly
+included the real slide number in its citation, and one (asking
+something not in any material) correctly declined rather than answering
+from the model's own training knowledge. 29 new tests (103 total).
+
+Two real bugs found through this verification, not assumed away:
+
+1. **The prompt's citation instruction backfired.** Told the model to
+   cite "in the form (Title, page_ref)" — meant as a format template,
+   read by the model as literal text to reproduce. First real answer
+   came back citing "(Periodic Trends Notes, page_ref)" — the literal
+   word "page_ref", not an actual page number. Fixed by giving a
+   concrete example instead of a bare placeholder name, and explicitly
+   telling it never to output "page_ref" or "Title" literally. Re-tested
+   against both a source with a real page/slide number and one without
+   (a plain .txt) — both now cite correctly.
+2. **A real chunking bug, caught by a test, not by inspection.** The
+   original `chunk_text()` trimmed each chunk's *end* to the nearest
+   word boundary but computed the *next* chunk's start by subtracting a
+   fixed character count from that trimmed end — which can land
+   mid-word regardless of where the previous chunk ended cleanly.
+   `test_prefers_breaking_on_whitespace_not_mid_word` caught a chunk
+   starting with `"silon"` (a fragment of "epsilon") on a synthetic
+   run — small enough that manual CLI testing of the 3 short real files
+   never happened to exercise the multi-chunk path at all. Fixed by
+   snapping the next chunk's start forward to the next word boundary
+   too, not just trimming the previous chunk's end. Re-verified against
+   a genuinely long, realistic passage (cellular respiration notes, 2
+   real chunks) — confirmed no fragments, and the overlap correctly
+   repeats whole words across the boundary, not partial ones.
+
+Scope cuts, stated plainly: no `--course` auto-detection (the flag
+exists, nothing infers it from filename/content); citation is
+retrieval-based only — nothing stops a chat backend from ignoring the
+"cite exactly this label" instruction, verified to work against Groq's
+`openai/gpt-oss-20b` specifically, not guaranteed for every possible
+provider/model; card generation and the mastery write-back loop
+described in §8 are step 6, not this slice — this is retrieval +
+grounded Q&A only.
+
+**Real user testing found a genuine retrieval-quality gap, fixed with
+hybrid search.** First question asked against real uploaded content (a
+DBQ document, AP World History format — numbered "Document 1" through
+"Document 7" excerpts) failed: "what is document 3 about" correctly
+declined to answer rather than hallucinate, but for the wrong reason —
+the chunk containing the literal text "Document 3" (confirmed present
+and correctly extracted, via direct inspection of the stored chunk, not
+assumed) ranked **16th of 19** by dense cosine similarity alone. Root
+cause, not just symptom: a small dense embedding model captures semantic
+*topic* similarity well but is structurally weak at exact/numbered
+references — the token "3" gets diluted into an average against generic
+words repeated in every chunk of that material ("Unit 1 DBQ"). No
+amount of `top_k` tuning fixes a chunk ranked 16th; this needed a second
+retrieval signal.
+
+Fix: real hybrid retrieval, dense + lexical, merged by Reciprocal Rank
+Fusion (`app/tutor/qa.py`):
+- Lexical side uses SQLite's built-in FTS5 (`app/db/connection.py`'s
+  `_ensure_chunks_fts` — external-content table + sync triggers, so it
+  stays consistent from any code path that touches `chunks`, not just
+  `materials.py`; confirmed available in this environment before relying
+  on it, and degrades to dense-only if a SQLite build lacks it, rather
+  than assuming). Zero new dependencies — this is exactly the kind of
+  case FTS5 exists for.
+- `_fts_query()` OR's the question's non-stopword terms together (bare
+  space-separated FTS5 terms mean AND by default — far too strict for a
+  natural-language question) and lets `bm25()` do the real work of
+  weighting rarer terms — like "3" — higher than common ones like
+  "document"/"unit"/"dbq" that appear in nearly every chunk of this
+  particular material.
+- Merged via standard RRF (`score = Σ 1/(60 + rank)` across whichever
+  ranking(s) a chunk appears in) rather than a hand-tuned weighted sum —
+  a chunk doesn't need to win outright on one signal, scoring well on
+  either is enough to surface it.
+
+Verified against the real failing case at each step, not just re-run
+once and called done: lexical-only ranking already put the right chunk
+at **#2** (bm25 correctly recognized "3" as the distinctive term) — but
+RRF at equal 1:1 weighting only pulled its combined rank to **6th**,
+because the dense side was *so* bad (16th) that even a strong lexical
+signal couldn't fully outweigh it within `top_k=5`. Rather than
+hand-tuning the RRF weighting to just barely cross that one threshold
+(tried the arithmetic — a 1.5x lexical weight happens to work, but
+"happens to just barely work for this one case" is a sign of overfitting
+a knob to a single data point, not a real fix), raised `DEFAULT_TOP_K`
+from 5 to 8 instead — cheap, safe, generalizes to the whole class of
+"specific item in a list" query rather than this one instance. Then hit
+a *second*, unrelated bug the first fix exposed: `cli.py`'s `ask` command
+had its own hardcoded `top_k: int = typer.Option(5, ...)`, entirely
+separate from `qa.py`'s `DEFAULT_TOP_K` — so the constant change had zero
+effect until this was caught by literally re-running the real failing
+query and seeing 5 sources instead of 8. Now imports the constant instead
+of duplicating it, so this can't happen again. Final verification: the
+original query now correctly answers "Marco Polo's Travels... Kublai
+Khan," matching the actual stored chunk text; tested "document 1" and
+"document 7" against the same real material too, both correct and
+distinct — confirms the fix generalizes across the document rather than
+being tuned to one lucky number. 4 new tests reproducing the dense-loses-
+lexical-wins scenario directly, not just re-asserting the fix worked once
+live (107 total).
+
+Stated honestly, not oversold: RRF at `top_k=8` makes this *reliable*,
+not *guaranteed* — a material with many more than ~19 short numbered
+items competing for the same generic surrounding words could still see
+a specific one narrowly miss the cutoff. The real, durable fix on top of
+this would be structure-aware chunking (splitting on detected "Document
+N"-style headers so each numbered item gets its own clean, undiluted
+chunk instead of landing mid-chunk next to unrelated neighboring text) —
+noted as a natural next improvement to `chunk.py`, not built here.
+
+Next: **step 6, spaced review.** FSRS-scheduled cards generated from
+chunks, graded, writing `mastery.theta` back per topic — closing the
+loop described in §8 so weak topics actually pull more of the
+scheduler's attention, not just a static plan.

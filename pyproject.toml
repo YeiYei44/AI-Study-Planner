@@ -9,10 +9,26 @@ dependencies = [
     "pydantic-settings>=2.3",
     "typer>=0.12",
     "rich>=13.7",
+    "anthropic>=0.40",
+    "openai>=1.40",
+    # Local embeddings (ONNX via fastembed, no torch — ~150MB total vs.
+    # sentence-transformers' torch dependency, which would be gigabytes).
+    # Always local regardless of which chat backend answers questions:
+    # Groq (this project's default chat backend) has no embeddings
+    # endpoint at all, and embedding is cheap enough to never need a
+    # paid API for it anyway.
+    "fastembed>=0.4",
+    "numpy>=1.26",
+    # Material text extraction — all pure-Python-ish, no heavy native deps.
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "python-pptx>=1.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Heavy, compiled, platform-specific — only needed for ASP_LLM_BACKEND=local.
+local = ["llama-cpp-python>=0.3"]
 
 # Deliberately no [project.scripts] entry point: that generates an
 # asp.exe wrapper in Scripts/ on install, and a newly-created unsigned
