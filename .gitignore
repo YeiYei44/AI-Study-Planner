@@ -10,6 +10,12 @@ data/
 # them outside the repo entirely if possible.
 *cookies*.json
 canvas-cookies.json
+# Uploaded course material (`material add`) — personal coursework, not
+# project source; this repo is public. No legitimate reason for these
+# extensions to be tracked in this codebase either way.
+*.pdf
+*.docx
+*.pptx
 node_modules/
 dist/
 build/

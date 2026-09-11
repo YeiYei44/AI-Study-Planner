@@ -3,9 +3,9 @@
   "image": "mcr.microsoft.com/devcontainers/python:3.12-bookworm",
   "features": {
     // A minimal Linux desktop (Fluxbox) served over noVNC on port 6080.
-    // Lets `asp login` open a real browser you view in a browser tab, so
-    // the Microsoft SSO login happens inside the Codespace and your
-    // device's extension/DevTools restrictions don't apply.
+    // Lets `python -m app.cli login` open a real browser you view in a
+    // browser tab, so Microsoft SSO happens inside the Codespace and
+    // your device's extension/DevTools restrictions don't apply.
     "ghcr.io/devcontainers/features/desktop-lite:1": {},
     // For the React frontend in later build steps.
     "ghcr.io/devcontainers/features/node:1": { "version": "20" }
@@ -15,6 +15,14 @@
     "6080": { "label": "Desktop (noVNC)", "onAutoForward": "silent" }
   },
   "remoteEnv": { "DISPLAY": ":1" },
-  "postCreateCommand": "pip install -e '.[dev]' && python -m playwright install --with-deps chromium",
+  // The `asp` shortcut is a plain shell script written here, in the
+  // Codespace only — deliberately NOT a [project.scripts] entry point in
+  // pyproject.toml, which would generate an asp.exe wrapper on `pip
+  // install` anywhere, including the school device where exactly that
+  // class of thing (a newly-created executable) has already been killed
+  // or flagged by endpoint security. This script only ever exists inside
+  // the Codespace; `pip install -e .` locally is completely unaffected,
+  // and `python -m app.cli ...` keeps working everywhere regardless.
+  "postCreateCommand": "pip install -e '.[dev]' && python -m playwright install --with-deps chromium && mkdir -p ~/.local/bin && printf '#!/bin/sh\\nexec python -m app.cli \"$@\"\\n' > ~/.local/bin/asp && chmod +x ~/.local/bin/asp",
   "remoteUser": "vscode"
 }
