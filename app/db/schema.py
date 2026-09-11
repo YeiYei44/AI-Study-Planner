@@ -86,6 +86,21 @@ CREATE TABLE IF NOT EXISTS sessions (
     note                        TEXT
 );
 
+-- Whether the *whole assignment* is done, not just individual scheduled
+-- blocks — a separate table, deliberately, same reason estimates/
+-- sessions are separate from assignments: sync.py's upsert overwrites
+-- every Canvas-sourced column on every sync, so a "completed" flag
+-- stored directly on the assignments row would get silently wiped the
+-- next time you sync. generate_plan() excludes anything marked here —
+-- closing a gap this project's own docs flagged and left open: a
+-- regenerated plan had no way to know an assignment was actually done,
+-- and would schedule it again forever.
+CREATE TABLE IF NOT EXISTS assignment_status (
+    assignment_id   INTEGER PRIMARY KEY REFERENCES assignments(id),
+    completed       INTEGER NOT NULL DEFAULT 0,
+    completed_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS plan_blocks (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     date            TEXT NOT NULL,     -- "YYYY-MM-DD"

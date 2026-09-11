@@ -9,10 +9,15 @@ v1 scope, stated plainly:
   correctly, and a consistent block length is easier to actually keep to
 * one reserved buffer block per day, not a percentage
 * weekly availability template only; no blackout dates yet
-* doesn't subtract time already covered by locked/completed blocks from
-  a later regeneration's "minutes needed" — harmless while nothing is
-  locked/completed yet, needs that subtraction once blocks can be marked
-  done (the calibration/history feature, step 4+)
+* an assignment marked fully done (app/db/completion.py's
+  assignment_status, distinct from log_session()'s per-block completed
+  flag) is excluded outright — closing the gap this docstring used to
+  flag here. What's still open: *partial* progress isn't accounted for.
+  Logging some time via log_session() marks whichever blocks already
+  existed as done, but doesn't reduce what a later regeneration thinks
+  is still needed — it'll schedule the assignment's full estimate again
+  from scratch rather than the remainder. Only "fully done" is tracked,
+  not "X minutes in."
 """
 
 from __future__ import annotations
@@ -88,7 +93,10 @@ def generate_plan(
         day_slots[day] = blocks
 
     assignments = conn.execute(
-        "SELECT * FROM assignments WHERE due_at IS NOT NULL AND workflow_state = 'published'"
+        "SELECT a.* FROM assignments a "
+        "LEFT JOIN assignment_status s ON s.assignment_id = a.id "
+        "WHERE a.due_at IS NOT NULL AND a.workflow_state = 'published' "
+        "AND COALESCE(s.completed, 0) = 0"
     ).fetchall()
 
     candidates = []

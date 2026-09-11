@@ -49,6 +49,8 @@ from rich.table import Table
 
 from app.config import get_settings
 from app.db.connection import connect as db_connect
+from app.db.completion import UnknownAssignmentError as UnknownAssignmentForCompletion
+from app.db.completion import set_completed
 from app.db.sessions import UnknownAssignmentError, log_session
 from app.db.sync import record_sync_run, sync_courses_and_assignments
 from app.ingest.canvas import CanvasClient
@@ -631,6 +633,39 @@ def log(
     msg = f"[green]Logged {minutes} min on {esc(result.assignment_name)}.[/]"
     if result.blocks_marked_done:
         msg += f" Marked {result.blocks_marked_done} scheduled block(s) done."
+    console.print(msg)
+
+
+@app.command()
+def complete(
+    assignment_id: int = typer.Argument(..., help="Assignment id — see `assignments --all`"),
+    undo: bool = typer.Option(False, "--undo", help="Mark it not-done again"),
+) -> None:
+    """Mark an assignment fully done (or, with --undo, not done).
+
+    A completed assignment is left out of the next `plan` entirely,
+    instead of having its remaining estimate scheduled again.
+    """
+    settings = get_settings()
+    conn = db_connect(settings)
+    try:
+        result = set_completed(conn, assignment_id, completed=not undo)
+    except UnknownAssignmentForCompletion:
+        console.print(
+            f"[red]No assignment with id {assignment_id}. "
+            "Run `assignments --all` to find it.[/]"
+        )
+        raise typer.Exit(1)
+    finally:
+        conn.close()
+
+    if result.completed:
+        msg = f"[green]Marked {esc(result.assignment_name)} done.[/]"
+        if result.blocks_marked_done:
+            msg += f" Cleared {result.blocks_marked_done} scheduled block(s) for it."
+        msg += " Run `plan` to regenerate without it."
+    else:
+        msg = f"[green]Marked {esc(result.assignment_name)} not done.[/]"
     console.print(msg)
 
 
