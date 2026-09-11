@@ -85,6 +85,35 @@ async def check_auth(context: BrowserContext, base_url: str) -> AuthStatus:
     return AuthStatus(ok=False)
 
 
+async def _persist_session_cookies(
+    context: BrowserContext, ttl_s: int
+) -> None:
+    """Give any session-only cookie in ``context`` (no Expires/Max-Age,
+    which is what Canvas's own session cookie is) a concrete future
+    expiry, so it survives ``context.close()``.
+
+    Every CLI invocation launches its own ``launch_persistent_context``,
+    does one thing, and closes it — and Chromium's correct, by-design
+    behavior is to drop cookies that were never given an expiration when
+    a context closes (that *is* what "session cookie" means). We're
+    effectively "the browser" across many short-lived processes rather
+    than one long-running one, so without this, a successful sign-in can
+    report success and then leave nothing for the very next invocation to
+    find. Only changes local retention — Canvas's server enforces its own
+    session expiry independently of whatever we tell our own profile to
+    keep.
+    """
+    cookies = await context.cookies()
+    future = int(time.time()) + ttl_s
+    session_only = [
+        {**c, "expires": future}
+        for c in cookies
+        if not c.get("expires") or c["expires"] <= 0
+    ]
+    if session_only:
+        await context.add_cookies(session_only)
+
+
 def _launch_args() -> list[str]:
     return ["--disable-blink-features=AutomationControlled"]
 
@@ -207,6 +236,10 @@ async def interactive_login(settings: Settings | None = None) -> dict[str, Any]:
                     "that appeared, then try `python -m app.cli login` again."
                 ) from e
             if status.ok:
+                with contextlib.suppress(Exception):
+                    await _persist_session_cookies(
+                        context, settings.local_session_cookie_ttl_s
+                    )
                 return status.user or {}
             await asyncio.sleep(2)
 
@@ -308,6 +341,11 @@ async def install_cookies(
         try:
             await context.add_cookies(cookies)  # type: ignore[arg-type]
             status = await check_auth(context, settings.canvas_base_url)
+            if status.ok:
+                with contextlib.suppress(Exception):
+                    await _persist_session_cookies(
+                        context, settings.local_session_cookie_ttl_s
+                    )
         finally:
             await context.close()
     finally:

@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # Browser / session
     headless: bool = True
     login_timeout_s: int = 300
+    # How long our local profile keeps a session-only cookie (one with no
+    # Expires/Max-Age, like Canvas's) alive across separate CLI process
+    # launches. Purely a local storage detail — Canvas's server enforces
+    # its own, independent session expiry regardless of this value.
+    local_session_cookie_ttl_s: int = 60 * 60 * 24
 
     # API client
     request_max_concurrency: int = 3

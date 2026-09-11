@@ -169,6 +169,34 @@ the block, since there's a zero-cost alternative: `python -m app.cli
 new executable created for anything to flag. All docs and in-app help
 text now say `python -m app.cli ...` throughout.
 
+**Fourth finding: a real login didn't survive between commands.**
+`import-cookies` reported a successful sign-in; the very next `sync`
+reported the session gone. Cause: Canvas's session cookie has no
+`Expires`/`Max-Age` (`expires: -1` in Playwright's export — confirmed by
+inspecting the actual exported file) — a true session cookie, correctly
+dropped by Chromium when a `launch_persistent_context` closes, which is
+what "session cookie" means. Every CLI invocation is its own process:
+launch, do one thing, close. So the cookie was live for the `check_auth`
+call `import-cookies` made *inside* its own still-open context (hence the
+reported success), then discarded on close, then absent for `sync`'s
+separate, later context launch against the same profile. Never surfaced
+earlier because every prior test was either an empty profile (correctly
+unauthenticated) or blocked before a real login completed.
+
+Fix: `_persist_session_cookies()` in `session.py` — right after a login
+or cookie-import is confirmed valid, before the context closes, rewrite
+any cookie with no expiry to one with a concrete future timestamp
+(`local_session_cookie_ttl_s`, default 24h). This only changes what our
+own local Chromium profile retains between separate process launches;
+Canvas's server independently enforces its own session expiry regardless
+of what the client-side `Expires` attribute says, so this doesn't weaken
+or extend anything the server actually trusts — it just stops our own
+multi-process architecture from discarding a still-valid session for a
+reason that has nothing to do with the server. Verified directly (no
+network needed): added a session-only cookie, closed and reopened a
+context against the same profile — gone without the fix, present with
+matching value and a real `expires` with it.
+
 **Re-login as a first-class state.** APScheduler runs syncs every few
 hours. A 401 flips a `session_dead` flag in the DB; the web UI shows a
 banner with a *Reconnect* button; clicking it calls a backend route that

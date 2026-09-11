@@ -120,7 +120,7 @@ def login_cdp(
     port open. On Windows PowerShell:
 
     \b
-        $chromium = (Get-ChildItem "$env:LOCALAPPDATA\ms-playwright\chromium-*\chrome-win64\chrome.exe" | Select-Object -First 1).FullName
+        $chromium = (Get-ChildItem "$env:LOCALAPPDATA\\ms-playwright\\chromium-*\\chrome-win64\\chrome.exe" | Select-Object -First 1).FullName
         & $chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check about:blank
 
     Leave that window open, then run this command. It connects to that
@@ -173,7 +173,17 @@ def import_cookies(
     """
     settings = get_settings()
     if path is not None:
-        text = path.read_text()
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            console.print(
+                f"[red]No file at {path} in this Codespace.[/] If it's on "
+                "another machine, it needs to be transferred first — drag "
+                "it into VS Code's Explorer panel, use its "
+                "Upload... option, or paste the file's contents by "
+                "running `import-cookies` with no path."
+            )
+            raise typer.Exit(1)
     elif not sys.stdin.isatty():
         text = sys.stdin.read()
     else:
