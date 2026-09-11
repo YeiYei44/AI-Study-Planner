@@ -22,11 +22,26 @@ records what things actually took, and `calibration` learns a real
 per-type pace multiplier from that — applied automatically, never
 overriding an `estimate` you set by hand. `material add` extracts,
 chunks, and embeds your own files (syllabi, slides, notes — Canvas alone
-never covered lecture content); `ask` answers questions grounded only in
-what you've uploaded, with citations, and says so plainly when your
-materials don't cover something rather than guessing. Verified against a
-real account, real assignments, and real files — not just unit tests.
-Step 6 (spaced review) is not built yet.
+never covered lecture content); it also does the same for every synced
+assignment's own name/due date/points/description (`sync` keeps this
+current automatically), so `ask` answers questions grounded in *both*
+what you've uploaded and what Canvas already has, with citations, and
+says so plainly when neither covers something rather than guessing. A
+"what's due soon" style question is answered from an always-current,
+always-included digest rather than similarity search, since ranking by
+topical similarity has nothing to grab onto for a schedule question.
+`complete` marks a whole assignment done, independent of whether you
+ever logged time against it — `plan` then leaves it out entirely instead
+of scheduling it again. Verified against a real account, real
+assignments, and real files — not just unit tests. Step 6 (spaced
+review) is not built yet.
+
+**Plus a TUI** (`asp tui`) — a dashboard, the full plan, per-assignment
+actions (estimate/complete/log), a persistent tutor chat, calibration,
+and availability settings, all in one interactive screen instead of
+separate one-shot commands. Login, cookie import/export, and material
+upload stay CLI-only; they're one-shot browser/file operations, not
+naturally interactive ones.
 
 ## Setup
 
@@ -65,6 +80,7 @@ python -m app.cli plan                                        # generate/regener
 # after you actually study:
 python -m app.cli log <assignment_id> <minutes>   # what it actually took
 python -m app.cli calibration                     # see the learned pace multipliers
+python -m app.cli complete <assignment_id>         # mark it fully done; --undo to reverse
 ```
 
 `login` needs a real display, so run it on your own machine. It stores
@@ -75,9 +91,11 @@ headless against that. When the session expires, `login` again.
 safety margin) into your availability, highest-priority first
 (points ÷ days-until-due), in fixed 45-minute blocks with one buffer
 block reserved per available day. Re-running it replaces the open plan;
-anything you've locked or marked complete is left alone. If it can't fit
-an assignment in before its deadline given everything else, it says so
-rather than silently dropping it.
+anything you've locked or marked complete is left alone, and any
+assignment you've marked done with `complete` is excluded entirely — not
+just its existing blocks, the assignment itself, so it never gets
+scheduled again. If it can't fit an assignment in before its deadline
+given everything else, it says so rather than silently dropping it.
 
 `estimate-llm` needs a backend configured — `ASP_LLM_BACKEND` picks
 which, see `.env.example` for each one's settings:
@@ -156,6 +174,55 @@ manual `estimate` override is never adjusted by this.
 `sync` also writes a raw JSON snapshot to `data/raw/<timestamp>/` on each
 run — the untouched API response, kept alongside the normalized SQLite
 rows for debugging and as the audit trail behind the diff.
+
+### TUI
+
+```bash
+asp tui
+```
+
+Six tabs, `Tab`/`Shift+Tab` or click to switch, `q` to quit:
+
+- **Dashboard** — course/assignment/material counts, last sync status,
+  upcoming assignments, this week's scheduled blocks. `r` to refresh.
+- **Plan** — the full open plan, 30 days out. `r` regenerates it in
+  place (same `generate_plan()`/`write_plan()` the `plan` CLI command
+  uses) — no need to leave the TUI to re-run it after logging time or
+  changing availability.
+- **Assignments** — every published assignment, with its estimate and
+  done/not-done status, grouped: overdue-and-not-done ("⚠ MISSING") at
+  the very top, the regular list in the middle, done work ("✓ COMPLETED")
+  out of the way at the bottom. Select a row: `c` toggles it done — like
+  a git commit, marking something done prompts for minutes spent first
+  (a number logs it as a real session in one step, same as `complete`
+  then `log`; blank marks done without logging; Escape cancels the whole
+  thing); undoing doesn't prompt. `e` prompts for a minutes estimate
+  (same as `estimate`), `l` prompts for actual minutes spent (same as
+  `log`). The prompts are a small reusable modal (`app/tui/modals.py`)
+  — Textual has no built-in input dialog.
+- **Tutor** — the same grounded, cited Q&A as `ask` (materials *and*
+  assignment descriptions/due dates), but as a persistent conversation
+  instead of one-shot calls: type a question, press Enter, the answer
+  and its sources append below. Needs a configured backend
+  (`ASP_LLM_BACKEND`) — says so plainly and disables the input if none
+  is set, rather than crashing.
+- **Calibration** — same live-computed multiplier table as the
+  `calibration` command.
+- **Settings** — the weekly availability template: `a` adds a spec
+  (same `"mon-fri 16:00-19:00"` syntax as `availability --add`), `x`
+  clears it (asks to confirm first — the one destructive action in the
+  TUI).
+
+Built on [Textual](https://textual.textualize.io/), tested against a
+real database, real calibration data, and a real Groq call — not just
+that it renders. One real bug worth knowing about if you extend this:
+switching tabs by default leaves keyboard focus on the tab bar itself,
+not the pane you switched to, silently breaking every pane's own
+keybindings until you click into the content by hand; disabling the tab
+bar's focusability (`Tabs.can_focus = False`) was the fix that actually
+held, including the trickier case of re-clicking a tab that's already
+active (which doesn't fire Textual's `TabActivated` event at all, so a
+handler that only listens for that misses it).
 
 ### Headless box / Codespace
 
@@ -249,11 +316,15 @@ app/
     normalize.py       raw Canvas JSON -> canonical row dicts
   db/
     schema.py          SQLite DDL (courses, assignments, sync_runs,
-                        availability, estimates, plan_blocks, sessions)
+                        availability, estimates, plan_blocks, sessions,
+                        assignment_status, materials, chunks)
     connection.py       connect() — WAL, schema bootstrap, column migrations,
                         chunks_fts (FTS5 hybrid-search index, auto-synced)
     sync.py            diff-then-upsert; returns what changed
     sessions.py         log_session() — actual time + mark blocks done
+    completion.py        set_completed()/is_completed() — mark a whole
+                        assignment done, distinct from log_session()'s
+                        per-block completion
   planner/
     availability.py    weekly template + "mon-fri 16:00-19:00" parsing
     estimate.py        estimate priority chain (user > llm > default) + calibration
@@ -261,17 +332,27 @@ app/
     llm_backends/        claude.py, openai_compat.py, local_llamacpp.py — pluggable,
                           each implementing estimate() and answer()
     calibration.py      live per-submission-type actual÷estimate multiplier
-    schedule.py         generate_plan() — backward-fill into availability
+    schedule.py         generate_plan() — backward-fill into availability,
+                        excludes anything marked done via completion.py
   tutor/
     extract.py         per-format text extraction (pdf/pptx/docx/txt/md)
     chunk.py           chunk_text() — overlapping, word-boundary-safe
     embed.py           local embeddings (fastembed, no torch)
     materials.py        add_material() — extract -> chunk -> embed -> store
-    qa.py              retrieve() + ask() — cited Q&A, no answer without a source
+    assignment_sync.py   sync_assignment_materials() — same pipeline,
+                        run per synced assignment instead of an uploaded file
+    qa.py              retrieve() + ask() — cited Q&A + an always-included
+                        upcoming-assignments digest; no answer without a source
+  tui/
+    app.py             StudyPlannerApp — tabs, focus routing
+    dashboard.py, plan_pane.py, assignments_pane.py, tutor_pane.py,
+    calibration_pane.py, settings_pane.py
+    modals.py          TextInputModal / ConfirmModal — reusable prompts
+    queries.py         shared read helpers, testable without Textual
   cli.py               login / login-cdp / export-cookies / import-cookies /
                         whoami / sync / assignments / availability /
-                        estimate / estimate-llm / plan / log / calibration /
-                        material add / material list / ask
+                        estimate / estimate-llm / plan / log / complete /
+                        calibration / material add / material list / ask / tui
 docs/DESIGN.md         architecture and decisions
 tests/
 ```

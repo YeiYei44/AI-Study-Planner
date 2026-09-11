@@ -435,11 +435,12 @@ later.
 plainly in `app/planner/schedule.py`'s docstring: fixed 45-minute blocks
 rather than variable-length slicing, one reserved buffer block/day rather
 than a percentage, a weekly availability template only (no blackout
-dates yet), and a regenerated plan doesn't yet subtract time already
-covered by locked/completed blocks from what's still needed (harmless
-while nothing is locked/completed yet — needs fixing once blocks can be
-marked done). None of these are secret shortcuts; all four are called out
-in the code and here.
+dates yet). A fourth gap — a regenerated plan had no way to know an
+assignment was actually *done*, and would schedule it again forever — was
+closed in §13: `assignment_status` + `complete`. What's still open, per
+§13, is tracking *partial* progress (some time logged, but not the whole
+assignment) rather than only all-or-nothing completion. None of these are
+secret shortcuts; all are called out in the code and here.
 
 Built:
 - `app/db/schema.py` — added `availability`, `estimates`, `plan_blocks`
@@ -827,7 +828,327 @@ N"-style headers so each numbered item gets its own clean, undiluted
 chunk instead of landing mid-chunk next to unrelated neighboring text) —
 noted as a natural next improvement to `chunk.py`, not built here.
 
-Next: **step 6, spaced review.** FSRS-scheduled cards generated from
-chunks, graded, writing `mastery.theta` back per topic — closing the
-loop described in §8 so weak topics actually pull more of the
-scheduler's attention, not just a static plan.
+## 12. TUI
+
+Requested once the underlying pipeline (steps 1-5) was already verified
+working end to end — at that point there were a dozen-plus one-shot CLI
+commands and no persistent view of "where do things stand," which is a
+genuinely different need than any single command answers. Built with
+[Textual](https://textual.textualize.io/): asyncio-native (the tutor's
+`ask()` and every backend's `answer()`/`estimate()` are already
+`async def` — nothing to bridge), same team as `rich`, which the CLI
+already leans on throughout.
+
+Four tabs (`app/tui/`), each a `Vertical` widget composed into one
+`TabbedContent`, sharing one `sqlite3.Connection` passed down from
+`StudyPlannerApp`:
+
+- **Dashboard** — counts, last sync status (from `sync_runs`, read
+  locally — never launches a live Canvas check itself, which would mean
+  a Playwright browser launch on every TUI open), upcoming assignments,
+  this week's plan.
+- **Plan** — the full open plan; `r` calls the same `generate_plan()`/
+  `write_plan()` the CLI's `plan` command does, in place.
+- **Tutor** — `app.tutor.qa.ask()` unchanged, just given a persistent
+  `RichLog` transcript instead of a one-shot print. `make_backend(tutor=
+  True)` is constructed once per pane and reused; `BackendConfigError`
+  shows inline and disables the input, rather than crashing the app over
+  a missing key.
+- **Calibration** — `multipliers_by_type()`, live, same as the CLI.
+
+Login, cookie import/export, and material upload stay CLI-only —
+one-shot browser/file operations, not naturally interactive ones; the
+TUI doesn't try to reimplement them.
+
+**Two real bugs, both about focus, neither hypothetical** — found by
+testing actual tab-switching with Textual's `Pilot` (real click
+simulation, not just "does it render"), not by inspection:
+
+1. `TabbedContent`'s default behavior on switching tabs leaves keyboard
+   focus on the tab bar itself, not anything inside the newly-visible
+   pane. Confirmed directly: after clicking to the Plan tab,
+   `app.focused` was the `ContentTabs` widget, and pressing `r`
+   (Plan's own refresh binding) did nothing at all — Textual bindings
+   only fire along the currently-focused widget's chain. Every pane's
+   keybindings, and the Tutor tab's input, were silently unusable after
+   any tab switch until the user manually clicked into the content
+   first — the exact "why doesn't this key work" experience I would not
+   have wanted to ship.
+2. The first fix attempt — handling `TabbedContent.TabActivated` to
+   redirect focus into the new pane's default widget — worked for a
+   genuine switch, but not for re-clicking a tab that's *already*
+   active: confirmed that click doesn't fire `TabActivated` at all (no
+   real state change), yet still moves focus to the tab bar as an
+   ordinary side effect of clicking a focusable widget. Root-caused
+   rather than chasing more event types: the tab bar never needs
+   keyboard focus in this app's design at all, so `Tabs.can_focus =
+   False` (set on every `Tabs` instance at mount) removes the failure
+   mode entirely rather than reacting to more of its triggers. Verified
+   both the genuine-switch and re-click-same-tab cases explicitly after
+   the fix, not just the one that was originally reported.
+
+Also carried over a lesson from `cli.py`'s markup-escaping bug rather
+than relearning it: checked, before writing any pane, whether
+`Textual`'s widgets shared that vulnerability. They don't, by default —
+`RichLog` defaults to `markup=False` (confirmed: a literal `[optional]`
+in a string survives unparsed) and `DataTable` cell values are always
+literal regardless. Styling uses `Text.from_markup()` explicitly for the
+parts meant to be styled; everything dynamic (course/assignment/material
+names, citation labels, the tutor's actual answer text) passes through
+as plain strings or `Text(...)`, never through a markup parser — a
+citation containing real brackets was used as an actual test case
+(`"Course [Notes]"`), not just reasoned about.
+
+12 new tests (119 total) — including both focus-routing bugs as
+permanent regressions, the bracket-safety property, a fake-backend
+round trip through the real `ask()`/prompt/citation path, and the two
+plan-regeneration outcomes (no availability set; blocks placed).
+`pytest-asyncio` (`asyncio_mode = "auto"`) added — Pilot-driven tests are
+inherently `async def`, and nothing here previously needed that.
+
+Real, hands-on verification beyond the test suite: launched against the
+actual database (13 courses, 112 assignments, real calibration data, the
+real DBQ material) and asked the tutor tab the exact "document 7"
+question from step 5's retrieval fix — got the identical, correct Madrid
+Codex answer through the TUI that the CLI's `ask` gave, confirming the
+pane wraps the real pipeline rather than a simplified copy of it.
+
+## 13. Marking assignments done
+
+Requested alongside two other asks (tutor-over-assignments, TUI settings
+parity — both tracked separately as they land). This one: `generate_plan()`
+had a real, previously-flagged gap — nothing marked an assignment *done*,
+so every regeneration scheduled it again regardless of whether it was
+actually finished. `log_session()` already marked individual scheduled
+*blocks* complete, but that's a different, narrower thing: it only
+affects blocks that already exist at logging time, and doesn't stop a
+later regeneration from scheduling the assignment's full estimate again
+from scratch.
+
+`assignment_status` (`app/db/schema.py`) is a new table, not a column on
+`assignments` — same reasoning as `estimates`/`sessions` being separate
+tables: `sync.py`'s upsert overwrites every Canvas-sourced column on
+every sync, so a `completed` flag stored directly on the assignments row
+would get silently wiped the next time you sync. `app/db/completion.py`'s
+`set_completed()` is the write path — records `completed`/`completed_at`,
+and (mirroring `log_session()`) also marks that assignment's still-open
+*unlocked* scheduled blocks done, so a plan already on screen doesn't
+still show it as outstanding. `generate_plan()`'s assignment query
+(`app/planner/schedule.py`) now `LEFT JOIN`s `assignment_status` and
+excludes anything completed — the fix is one `WHERE` clause, because the
+hard part was the table design, not the scheduling logic.
+
+CLI: `complete <id>` / `complete <id> --undo`, same shape as `log`.
+
+**What this doesn't do yet:** partial progress. Completion is all-or-
+nothing — logging 30 minutes toward a 90-minute estimate doesn't reduce
+what the next regeneration thinks is still needed; only `complete`
+marking the *whole* assignment done removes it from scheduling. Revisit
+if that turns out to matter in practice (it may not — `log_session()`'s
+per-block completion already keeps a plan already on screen from
+re-offering time already spent; the gap is only about regeneration).
+
+7 new tests (126 total): `assignment_status`/`set_completed()`/
+`is_completed()` in isolation (unknown-id error, timestamp set/cleared,
+locked-vs-unlocked block handling — mirroring `log_session()`'s existing
+coverage), plus `generate_plan()` excluding a completed assignment and
+correctly re-including it after `--undo`.
+
+Verified against the real database, not just tests: marked a real
+assignment ("Tee Shirt Contest", id 836678) complete, regenerated the
+plan, confirmed it no longer appeared; undid it; restored the database
+from a pre-test backup afterward so this verification run left no trace
+in the user's real data.
+
+## 14. Tutor context from assignments
+
+The tutor (§8) could only ever answer from files the user manually
+uploaded — nothing about Canvas assignment content (descriptions, due
+dates, points) was searchable, even though it had already been synced
+into `assignments`. Two separate mechanisms, chosen for different
+reasons:
+
+**Assignment descriptions, as materials** — `app/tutor/assignment_sync.py`
+synthesizes one `materials` row (`kind='assignment'`) per published
+assignment, text built from name/course/due date/points/description
+(HTML stripped via the same `strip_html()` `llm_estimate.py`'s prompt-
+building already used), chunked and embedded through the *exact* same
+`chunk_text`/`embed_texts` calls `materials.py` uses for uploaded files.
+Deliberately not a parallel retrieval system: one pipeline means one
+citation format, and `qa.py`'s hybrid retrieval, RRF fusion, and FTS5
+fallback all apply to assignment content for free. Content-hash cached
+(same pattern as `estimates.content_hash` — a table, not a column,
+because `sync.py`'s upsert would silently wipe a column-based cache key
+on every resync) so a `sync` that changes nothing re-embeds nothing.
+Stale materials (assignment unpublished, or its row gone) are cleaned up
+the same run. Wired into `sync` itself, not a separate opt-in command
+like `estimate-llm`: unlike LLM estimation, embedding is local-only
+(`fastembed`, no network/API cost), so there's no reason to make the user
+remember a second step.
+
+**Upcoming-assignment digest, always included, not retrieved** — a
+"what's due this week" question has no real lexical or semantic reason
+to prefer one assignment's material chunk over any other's; every
+assignment's synthesized material is *about* being an assignment in
+roughly the same way, so similarity ranking has nothing to grab onto.
+This is exactly the class of problem §8/connection.py already hit once
+(dense embeddings underweighting the literal string "Document 3") and
+fixed with hybrid lexical+dense search — but a schedule question isn't
+even really a *retrieval* problem, so `qa.py`'s `assignment_digest()`
+sidesteps it entirely: a plain SQL query, soonest-due-first, capped at 30
+rows, always appended to the prompt regardless of what similarity search
+returns, labeled explicitly as not needing citation (it isn't an
+excerpt). `ask()`'s "nothing to answer from" short-circuit now only
+fires when *both* retrieval and the digest are empty.
+
+Verified against the real database (112 real assignments, all newly
+embedded — took ~20s one-time, confirmed near-instant/cached on a
+repeat run): asked "When is the Tee Shirt Contest assignment due, and
+how many points is it worth?" — got the correct due date and points,
+cited `(Tee Shirt Contest)`, pulled from the synthesized assignment
+material, not a coincidence of a matching uploaded file. Asked a broader
+"what's due soonest" question — got the four real assignments actually
+tied for earliest due date, correctly read from the digest despite the
+retrieved excerpts (Spanish quizzes, an AP Calc set) being entirely
+unrelated — exactly the failure mode the digest exists to avoid.
+
+13 new tests (139 total): `assignment_sync.py` in isolation (embeds,
+skips when unchanged, re-embeds on content change without duplicating
+the materials row, removes materials for unpublished/vanished
+assignments); `assignment_digest()` (ordering, excludes past-due,
+excludes unpublished, includes course/due/points, respects the row cap);
+`ask()` including the digest in the prompt both with and without
+retrieved chunks.
+
+## 15. TUI parity with the CLI's settings commands
+
+The last third of the request that opened §13/§14: `estimate`,
+`complete`, `log`, and `availability` were CLI-only, so acting on
+anything the Assignments/Dashboard view surfaced meant leaving the TUI.
+Two new tabs, six tabs total now.
+
+**Assignments tab** (`app/tui/assignments_pane.py`) — every published
+assignment in one `DataTable` (due, course, name, points, estimate,
+done), row-selected actions: `c` toggles complete (`app/db/completion.py`
+directly, same as the `complete` CLI command), `e` prompts for a minutes
+estimate (`estimate`), `l` prompts for actual minutes spent (`log`).
+`all_assignments_with_status()` (`queries.py`) is a three-way `LEFT
+JOIN` — assignments, estimates, assignment_status — kept in `queries.py`
+rather than the pane itself, matching the existing split (query helpers
+testable without spinning up Textual).
+
+Two refinements added after the first pass, both from direct user
+feedback on the shipped tab rather than anticipated up front: **grouped,
+not flat** — completed assignments sort to a "✓ COMPLETED" section at
+the bottom instead of sitting inline wherever their due date happens to
+fall (once done, out of the way), and overdue-not-done assignments sort
+to a "⚠ MISSING" section at the very top regardless of the rest of the
+ordering (the most urgent thing to see first, ahead of even the soonest
+still-on-time item). The header rows are ordinary `DataTable` rows keyed
+`"header-missing"`/`"header-completed"` rather than assignment ids —
+`_selected_assignment_id()` returns `None` for a key that doesn't parse
+as `int`, so pressing an action on a header row is a no-op instead of a
+crash, the same defensive shape already used for "no row selected."
+
+**Git-commit-style completion** — marking something done now prompts for
+minutes spent before it commits, rather than a bare toggle: submit a
+number and it's logged as a real session (same effect as running `log`
+right after `complete`) in one step; submit blank and it's marked done
+with no session recorded; Escape cancels the whole action, matching how
+aborting a commit message aborts the commit rather than committing with
+an empty one. *Un*-marking something done doesn't prompt at all — there's
+nothing to log when undoing, and matching `set_completed()`'s own
+asymmetry (only completing marks blocks done; undoing doesn't try to
+guess which of those to unmark).
+
+**Settings tab** (`app/tui/settings_pane.py`) — the weekly availability
+template: `a` adds a spec (same `parse_availability_spec()` the CLI's
+`--add` uses — same syntax, same errors), `x` clears it after
+confirming. Clearing is the one destructive action added in this
+section, and the only place in the TUI that asks "are you sure" — the
+CLI's own `--clear` doesn't, but a stray keypress is a materially
+different risk than a typed command, so the two didn't need to match
+here.
+
+**`app/tui/modals.py`, new** — Textual has no built-in input dialog, and
+three different actions across two panes all needed the same shape:
+"prompt for one line of text, Enter submits, Escape cancels."
+`TextInputModal` covers all three (estimate minutes, log minutes,
+availability spec) rather than a bespoke screen per action;
+`ConfirmModal` is the yes/no equivalent, used once (clearing
+availability). Both are `ModalScreen[T]`, driven with `push_screen_wait`
+inside a `@work` async method — chosen over callback-passing because
+every one of these flows is "read one value, validate it, act," which
+reads linearly with `await` and gets awkward split across a callback for
+no benefit here (nothing needs more than one prompt in sequence).
+
+**A bracket-safety bug caught before shipping, not after** — every
+status message built from a real assignment name in `assignments_pane.py`
+(`Marked "..." done.`, `Logged N min on "..."`) goes through `Static`,
+and `Static.update()` parses Rich markup by default, unlike `DataTable`
+cells (§12 already established DataTable's own cells are always literal,
+which is why `course_name`/`name` are passed straight through there with
+no escaping). A real assignment name containing a literal `[` — none of the account's
+current 112 do (checked directly rather than assumed), but nothing
+about Canvas assignment titles rules it out, and §12's own citation test
+used `"Course [Notes]"` for exactly this reason — would hit the exact
+`cli.py` bug from earlier this project: `[optional]` parsed as an
+(invalid) style tag instead of displayed as text. Fixed the same way
+`cli.py` was: `rich.markup.escape` on every interpolated dynamic value
+before it reaches `Static.update()`. Caught by a test that renders the
+escaped source back through `Text.from_markup(...).plain` (what actually
+reaches the screen) rather than checking `Static.content` directly —
+`.content` on a `Static` is the *pre-render* source string, so a naive
+assertion against it would've shown the escaped form (a literal
+backslash) and silently validated nothing about whether the screen
+itself renders correctly.
+
+21 new tests (154 total): Assignments (table population, toggle-complete
+prompting for and logging real minutes then a no-prompt undo, blank
+input skipping the log, Escape cancelling the whole action rather than
+marking done anyway, missing-sorts-to-top, completed-sorts-to-bottom, a
+header row's actions being a no-op, estimate-set and log-time through
+the actual modal flow, cancel leaves nothing changed, the bracket-safety
+case above) and Settings (empty state, add-availability through the
+modal, an invalid spec's error surfaces, clear requires confirmation and
+a decline leaves data untouched).
+
+Real, hands-on verification beyond the test suite: launched headlessly
+against the actual database — Assignments tab correctly listed all 112
+real assignments with real estimates; Settings correctly showed the
+account's real 5-row weekly template.
+
+**A real isolation mistake, caught by its own consequences rather than
+by inspection** — the round-trip check of toggle-complete/set-estimate
+was meant to run against a throwaway copy, passed in as `Settings(...,
+db_path="/tmp/planner_verify.db")`. That doesn't work: `db_path`
+(`app/config.py`) is a `@property` computed from `data_dir`, not a
+pydantic field, so passing it as a constructor kwarg is silently
+swallowed by `extra="ignore"` rather than raising — the "isolated"
+verification actually ran against the live database the whole time.
+Confirmed empirically afterward: `Settings(data_dir=..., db_path=...).db_path`
+still resolves to `data_dir/planner.db` regardless of the second
+argument. The intended-77-minute estimate write from that run doesn't
+appear to have landed anywhere in the live `estimates` table (checked
+directly — no row anywhere has `minutes=77`), but the toggle-complete
+half did: with two real assignments both titled "Tee Shirt Contest"
+sharing the same due date, and the plain `ORDER BY due_at` used at the
+time giving SQLite no tiebreaker, "row 0" after the first toggle wasn't
+guaranteed to still be the same assignment — the "undo" press most
+likely landed on the second "Tee Shirt Contest" instead, leaving both
+marked complete rather than netting to zero. This surfaced later in this same session, when the user tried the
+Assignments tab themselves and, combined with their own exploration of
+the feature, ended up with 13 real assignments marked complete; asked
+directly, they confirmed keeping all 13 as-is rather than reverting. No code change followed from this
+(overriding `db_path` isn't something the app itself needs, only ad hoc
+verification scripts), but future isolated-DB verification should
+override `data_dir` to a temp directory, never `db_path` directly — the
+same pattern every test fixture in this repo already uses
+(`Settings(data_dir=tmp_path)`), which was available the whole time.
+
+This closes out the three-part request that opened §13: assignment
+completion (§13), tutor context from assignments (§14), and TUI parity
+(this section). Next: **step 6, spaced review** — FSRS-scheduled cards
+generated from chunks, graded, writing `mastery.theta` back per topic —
+closing the loop described in §8 so weak topics actually pull more of
+the scheduler's attention, not just a static plan.
