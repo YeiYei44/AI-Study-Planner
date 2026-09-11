@@ -38,6 +38,7 @@ from app.ingest.canvas import CanvasClient
 from app.ingest.cookies import filter_domain, load_cookies
 from app.ingest.session import (
     BrowserClosedError,
+    BrowserLaunchError,
     CanvasSession,
     LoginTimeoutError,
     NoDisplayError,
@@ -110,35 +111,54 @@ def login_cdp(
     cdp_url: str = typer.Option(
         "http://localhost:9222", "--cdp-url", help="Chromium's debugging endpoint"
     ),
+    auto_launch: bool = typer.Option(
+        True,
+        "--auto-launch/--no-auto-launch",
+        help="Launch Chromium ourselves if nothing's already listening at --cdp-url",
+    ),
 ) -> None:
-    """Sign in via a Chromium you launch yourself, for machines where
-    Playwright can't keep its own browser process alive (security
-    software on a managed device killing a freshly spawned automated
-    browser within seconds).
+    """Sign in via Chromium connected to over its debugging port, for
+    machines where Playwright can't keep its own browser process alive
+    (security software on a managed device killing a freshly spawned
+    automated browser within seconds).
 
-    First, launch Playwright's own Chromium by hand with a debugging
-    port open. On Windows PowerShell:
+    One command: launches Playwright's bundled Chromium as a plain OS
+    process (not through Playwright's own launcher — that's specifically
+    what gets killed), opens the Canvas login, waits for you to sign in,
+    and writes the resulting session to `out`. Leaves the browser window
+    open afterward; closing this command doesn't close it.
+
+    If that still gets killed, fall back to starting Chromium by hand
+    first (`--no-auto-launch`) — on Windows PowerShell:
 
     \b
         $chromium = (Get-ChildItem "$env:LOCALAPPDATA\\ms-playwright\\chromium-*\\chrome-win64\\chrome.exe" | Select-Object -First 1).FullName
         & $chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check about:blank
-
-    Leave that window open, then run this command. It connects to that
-    browser, navigates it to the Canvas login, waits for you to sign in,
-    and writes the resulting session to `out`. We only connect — closing
-    this command doesn't close your browser window.
     """
     settings = get_settings()
-    console.print(f"Connecting to Chromium at [cyan]{cdp_url}[/]...")
+    if auto_launch:
+        console.print(
+            f"Launching Chromium (or connecting to one already at "
+            f"[cyan]{cdp_url}[/])..."
+        )
+    else:
+        console.print(f"Connecting to Chromium at [cyan]{cdp_url}[/]...")
     try:
-        user, cookies = asyncio.run(login_via_cdp(cdp_url, settings))
-    except (LoginTimeoutError, BrowserClosedError) as e:
+        user, cookies = asyncio.run(
+            login_via_cdp(cdp_url, settings, auto_launch=auto_launch)
+        )
+    except (LoginTimeoutError, BrowserClosedError, BrowserLaunchError) as e:
         console.print(f"[yellow]{e}[/]")
         raise typer.Exit(1)
     except PlaywrightError as e:
         console.print(
-            f"[red]Couldn't connect to {cdp_url} — is Chromium running "
-            f"with --remote-debugging-port open? ({e})[/]"
+            f"[red]Couldn't connect to {cdp_url}"
+            + (
+                ""
+                if auto_launch
+                else " — is Chromium running with --remote-debugging-port open?"
+            )
+            + f" ({e})[/]"
         )
         raise typer.Exit(1)
 

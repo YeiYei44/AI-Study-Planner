@@ -83,8 +83,23 @@ itself.
 **1a — If Playwright can't keep its own browser open** on that machine
 (managed-device security software killing a freshly launched,
 automation-flagged browser within seconds — this can happen headed or
-headless, and isn't specific to Canvas): launch Chromium yourself instead
-of letting Playwright spawn it, then connect to it.
+headless, and isn't specific to Canvas):
+
+```bash
+python -m app.cli login-cdp canvas-cookies.json
+```
+
+This launches Chromium as a plain OS process (not through Playwright's
+own launcher, which is specifically what gets killed — the driver
+process, `--remote-debugging-pipe`, and the automation flag set together
+make a recognizable signature; a directly-launched browser over a plain
+debugging port looks the same as one a human started from a terminal),
+opens the Canvas login, waits for you to sign in, and writes the session
+out. Leaves the browser open afterward — closing the command doesn't
+close it. Same next step either way (`import-cookies`).
+
+If that *still* gets killed, fall back to starting Chromium by hand first
+(`--no-auto-launch` connects without launching anything):
 
 ```powershell
 # PowerShell
@@ -92,16 +107,9 @@ $chromium = (Get-ChildItem "$env:LOCALAPPDATA\ms-playwright\chromium-*\chrome-wi
 & $chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check about:blank
 ```
 
-Leave that window open, then in another terminal:
-
 ```bash
-python -m app.cli login-cdp canvas-cookies.json
+python -m app.cli login-cdp canvas-cookies.json --no-auto-launch
 ```
-
-It connects over the debugging port, navigates that window to the Canvas
-login, waits for you to sign in, and writes the session out — same file,
-same next step (`import-cookies`). It only connects; it never closes the
-browser you launched.
 
 **2 — Desktop in the Codespace.** `.devcontainer/` adds a noVNC desktop
 (Command Palette → *Codespaces: Rebuild Container*, then open port 6080,

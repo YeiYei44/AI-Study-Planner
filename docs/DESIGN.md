@@ -197,6 +197,34 @@ network needed): added a session-only cookie, closed and reopened a
 context against the same profile — gone without the fix, present with
 matching value and a real `expires` with it.
 
+**`login-cdp` now launches Chromium itself, still avoiding the kill.**
+The two-step flow (launch by hand, then connect) worked but was
+friction; the question was whether we could spawn Chromium ourselves
+without reintroducing whatever gets it killed. The reasoning: it's
+specifically Playwright's `launch()` that's the problem, because it
+launches through Playwright's own Node driver process — `--remote-
+debugging-pipe` IPC, driver-as-parent, a recognizable automation flag
+set. `connect_over_cdp` never spawns anything, so it was never the
+issue. So `login_via_cdp(auto_launch=True)` (the default) now resolves
+Playwright's bundled Chromium path via `chromium.executable_path` (no
+`launch()` call, so no driver spawn involved in getting that string) and
+starts it with a plain `subprocess.Popen` — same shape as a human
+launching it from a terminal, just with `python.exe` as the parent
+instead of `powershell.exe`. If something's already listening at
+`--cdp-url`, it connects to that instead of spawning a second one
+(`--no-auto-launch` forces this path unconditionally). Verified in this
+Codespace: `executable_path` resolves correctly with no launch; the spawn
+helper builds the right arguments and does start a real Chromium process
+(confirmed via its profile-directory output — it only fails to open a
+debug port here because this container requires `--no-sandbox` for
+Chromium, a Docker/Codespaces-specific restriction, irrelevant on a real
+Windows machine); `_wait_for_cdp`/`_cdp_alive` correctly report false
+while it's down and true once a debug port genuinely is up (proven with
+`--no-sandbox` added just for this test). What can't be verified from
+here: whether a `python.exe`-spawned Chromium actually survives the
+device's security software the way the hand-launched one did — that's
+answerable only on the real machine.
+
 **Re-login as a first-class state.** APScheduler runs syncs every few
 hours. A 401 flips a `session_dead` flag in the DB; the web UI shows a
 banner with a *Reconnect* button; clicking it calls a backend route that

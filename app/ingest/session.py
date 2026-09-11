@@ -22,8 +22,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,6 +73,10 @@ class BrowserClosedError(RuntimeError):
 
 class NoDisplayError(RuntimeError):
     """A visible browser was requested but there is no display."""
+
+
+class BrowserLaunchError(RuntimeError):
+    """We launched Chromium ourselves but it never opened a debugging port."""
 
 
 @dataclass
@@ -122,6 +130,74 @@ def _has_display() -> bool:
     if sys.platform != "linux":
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _cdp_port(cdp_url: str) -> int:
+    return urllib.parse.urlparse(cdp_url).port or 9222
+
+
+async def _cdp_alive(cdp_url: str) -> bool:
+    def _check() -> None:
+        urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1).read()
+
+    try:
+        await asyncio.to_thread(_check)
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+async def _wait_for_cdp(cdp_url: str, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if await _cdp_alive(cdp_url):
+            return True
+        await asyncio.sleep(0.3)
+    return False
+
+
+def _spawn_kwargs() -> dict[str, Any]:
+    """Detach the child so it outlives us and doesn't inherit our stdio."""
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
+
+
+def _spawn_chromium(
+    executable_path: str, cdp_url: str, profile_dir: Path
+) -> subprocess.Popen:
+    """Launch Chromium as a plain OS process — not through Playwright's
+    driver, which is what ``launch()``/``launch_persistent_context()`` do.
+
+    This is the whole point: a driver-spawned browser (Node driver as
+    parent, ``--remote-debugging-pipe`` IPC, a distinctive automation-flag
+    set) is what gets killed on some managed devices. A browser started
+    directly by our own process, over a plain TCP debugging port, is the
+    same shape as a human launching it from a terminal — which is exactly
+    what worked when done by hand. ``connect_over_cdp`` never spawns
+    anything itself, so it's unaffected either way.
+    """
+    _clear_stale_singleton_locks(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    args = [
+        executable_path,
+        f"--remote-debugging-port={_cdp_port(cdp_url)}",
+        "--remote-debugging-address=127.0.0.1",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ]
+    return subprocess.Popen(args, **_spawn_kwargs())
 
 
 class CanvasSession:
@@ -254,29 +330,50 @@ async def interactive_login(settings: Settings | None = None) -> dict[str, Any]:
 
 
 async def login_via_cdp(
-    cdp_url: str, settings: Settings | None = None
+    cdp_url: str = "http://localhost:9222",
+    settings: Settings | None = None,
+    auto_launch: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Sign in through a Chromium the user launched themselves, connected
-    to over the Chrome DevTools Protocol.
+    """Sign in through a Chromium connected to over the Chrome DevTools
+    Protocol, for machines where ``launch_persistent_context`` can't keep
+    its own browser process alive — some managed-device security software
+    kills a freshly spawned, automation-flagged browser within seconds,
+    headed or headless, regardless of destination site.
 
-    For machines where ``launch_persistent_context`` can't keep its own
-    browser process alive — some managed-device security software kills a
-    freshly spawned, automation-flagged browser within seconds, headed or
-    headless, regardless of destination site. Connecting to a browser the
-    user started by hand (a normal, visible launch, not spawned as our
-    child process) avoids that; Chromium's own cookie jar and CDP surface
-    behave identically either way, so ``check_auth`` and cookie export
-    work the same as through a launched context.
+    With ``auto_launch`` (the default), we start Chromium ourselves as a
+    plain OS process via ``subprocess.Popen`` — not through Playwright's
+    driver, which is specifically what ``launch()`` does and what gets
+    killed. A browser started directly by our own process over a plain
+    TCP debugging port is the same shape as a human launching it from a
+    terminal, which is what worked when done by hand. If something's
+    already listening at ``cdp_url`` (e.g. launched manually), we connect
+    to that instead of starting a second one. Pass ``auto_launch=False``
+    to always require a browser already running there.
 
     Doesn't rely on any persistent profile — everything needed comes back
     live over the connection during this one call: the confirmed user and
-    the Canvas cookies, ready to write out (e.g. ``python -m app.cli login-cdp``) and
-    carry to wherever the sync actually runs. We only *connect*, so
-    closing our end afterward disconnects, it doesn't close the user's
-    browser window.
+    the Canvas cookies, ready to write out (e.g. ``python -m app.cli
+    login-cdp``) and carry to wherever the sync actually runs. We only
+    *connect* (``connect_over_cdp`` never spawns anything itself), so
+    closing our end afterward disconnects, it doesn't close the browser.
     """
     settings = settings or get_settings()
     pw = await async_playwright().start()
+
+    if auto_launch and not await _cdp_alive(cdp_url):
+        _spawn_chromium(
+            pw.chromium.executable_path,
+            cdp_url,
+            settings.data_dir / "cdp-login-profile",
+        )
+        if not await _wait_for_cdp(cdp_url, timeout_s=20):
+            await pw.stop()
+            raise BrowserLaunchError(
+                f"Launched Chromium but it never opened a debugging port "
+                f"at {cdp_url}. Check for a security-software notification "
+                f"that appeared, or start it yourself and try again."
+            )
+
     try:
         browser = await pw.chromium.connect_over_cdp(cdp_url)
     except Exception:
