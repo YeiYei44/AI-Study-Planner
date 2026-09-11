@@ -5,6 +5,11 @@ __pycache__/
 venv/
 .env
 data/
+# Exported Canvas session cookies (real credentials) — these are meant to
+# be transferred between machines and imported, never committed. Keep
+# them outside the repo entirely if possible.
+*cookies*.json
+canvas-cookies.json
 node_modules/
 dist/
 build/
