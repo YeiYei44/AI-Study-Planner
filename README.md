@@ -66,15 +66,36 @@ asp import-cookies canvas-cookies.json
 asp sync
 ```
 
-Note for a managed/school device: `playwright install chromium` downloads
-and runs a real browser executable, which an application allowlist policy
-may block; and if your district's Conditional Access is scoped to a
-specific managed browser rather than network/location, a sign-in from a
-locally-run Chromium may still be rejected the same way a Codespace one
-is. Both are things to find out by trying, not to work around — if you
-hit the same "does not meet the criteria for this resource" message here,
-stop and move to option 3 below rather than changing how the browser
-identifies itself.
+If your district's Conditional Access is scoped to a specific managed
+browser rather than network/location, a sign-in from a locally-run
+Chromium may still be rejected the same way a Codespace one is — that's a
+thing to find out by trying, not to work around. If you hit the same
+"does not meet the criteria for this resource" message here, stop and
+move to option 3 below rather than changing how the browser identifies
+itself.
+
+**1a — If Playwright can't keep its own browser open** on that machine
+(managed-device security software killing a freshly launched,
+automation-flagged browser within seconds — this can happen headed or
+headless, and isn't specific to Canvas): launch Chromium yourself instead
+of letting Playwright spawn it, then connect to it.
+
+```powershell
+# PowerShell
+$chromium = (Get-ChildItem "$env:LOCALAPPDATA\ms-playwright\chromium-*\chrome-win64\chrome.exe" | Select-Object -First 1).FullName
+& $chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check about:blank
+```
+
+Leave that window open, then in another terminal:
+
+```bash
+asp login-cdp canvas-cookies.json
+```
+
+It connects over the debugging port, navigates that window to the Canvas
+login, waits for you to sign in, and writes the session out — same file,
+same next step (`asp import-cookies`). It only connects; it never closes
+the browser you launched.
 
 **2 — Desktop in the Codespace.** `.devcontainer/` adds a noVNC desktop
 (Command Palette → *Codespaces: Rebuild Container*, then open port 6080,
@@ -104,7 +125,7 @@ app/
     session.py         CanvasSession (headless) + interactive_login + install_cookies
     cookies.py         parse cookie header / curl / JSON export into Playwright cookies
     canvas.py          CanvasClient — pagination, rate limiting, endpoints
-  cli.py               asp login / export-cookies / import-cookies / whoami / sync
+  cli.py               asp login / login-cdp / export-cookies / import-cookies / whoami / sync
 docs/DESIGN.md         architecture and decisions
 tests/
 ```

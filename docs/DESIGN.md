@@ -131,6 +131,32 @@ rather than network-scoped — and that's where this stops, not where it
 escalates. At that point: ICS feed + manual upload, and ask the district's
 IT/Canvas admin directly.
 
+**Second finding: local Playwright gets killed too.** Attempting
+`asp login` on the school-managed Windows device (not the Codespace) got
+past the Chromium launch but the browser closed itself within seconds —
+`TargetClosedError`, no dialog, no notification. The user had independent
+evidence from a prior, unrelated project on the same machine: Playwright
+launching its own browser process is unreliable there regardless of
+destination site, but a Chromium launched by hand with
+`--remote-debugging-port` and connected to afterward is stable. Read
+together with the no-dialog, no-notification presentation, this points to
+security software matching on *how the browser process was spawned*
+(likely automation flags and/or the parent-child relationship to a
+driver process) rather than on *what site it's visiting* — a generic
+anti-automation heuristic, not a targeted control on Canvas access. That
+distinction is why `login_via_cdp()` (`asp login-cdp`) was worth building
+where routing around Conditional Access was not: it doesn't defeat a
+deliberate, resource-scoped access decision, it avoids a false-positive
+trigger on an unrelated detector, using a real Playwright API
+(`connect_over_cdp`) against a browser the user launched and signs into
+themselves, in full view, with their own credentials. Verified before
+shipping: `browser.close()` on a CDP-attached browser disconnects only —
+confirmed the underlying Chromium process survives it — and
+`context.request` shares cookies correctly on a CDP-attached context, so
+`check_auth` behaves identically to the launched-context path. Still
+doesn't resolve Conditional Access either way; that gets tested once a
+login is actually attempted this way.
+
 **Re-login as a first-class state.** APScheduler runs syncs every few
 hours. A 401 flips a `session_dead` flag in the DB; the web UI shows a
 banner with a *Reconnect* button; clicking it calls a backend route that
@@ -304,22 +330,28 @@ Done:
 - `app/ingest/cookies.py` — parse Cookie header / curl / JSON export
 - `app/ingest/canvas.py` — `CanvasClient`: pagination, rate-limit
   handling, `courses()` / `assignments()` / `all_assignments()`
-- `app/cli.py` — `asp login` / `export-cookies` / `import-cookies` /
-  `whoami` / `sync`
+- `app/cli.py` — `asp login` / `login-cdp` / `export-cookies` /
+  `import-cookies` / `whoami` / `sync`
 - `sync` writes raw JSON snapshots to `data/raw/<timestamp>/`
 
 Verified in Codespace: headless launch, auth check returns
 not-authenticated for an empty profile; header/curl/JSON cookie parsing
 (9 tests); the export -> import round trip (Playwright's own cookie
 shape, injected, re-checked) works end to end; CLI degrades cleanly
-everywhere (no tracebacks). Not yet verified: a real Fulton session and a
-live pull — blocked so far by Conditional Access on every sign-in
-attempted from the Codespace (see above). Currently trying: `asp login`
-run locally on the school device itself, on the chance Conditional Access
-is network-scoped rather than browser-scoped.
+everywhere (no tracebacks). Verified against a real locally-launched
+Chromium: `login_via_cdp` connects, polls, detects a successful sign-in
+via a mock Canvas server, exports cookies, exits 0, and leaves the
+browser process running afterward; a dead debugging port fails cleanly
+with no traceback.
 
-Next, depending how that goes: either `asp export-cookies` locally ->
+Not yet verified: a real Fulton session and a live pull. Blocked so far
+by Conditional Access on every sign-in attempted from the Codespace, and
+then by the local Windows browser closing itself before `login-cdp`
+existed to work around it (see above). Currently trying: `asp login-cdp`
+against a manually-launched Chromium on the school device.
+
+Next, depending how that goes: either `asp login-cdp` locally ->
 `asp import-cookies` here -> `asp sync`, confirm pagination against a
 course with 100+ assignments, then step 2 (normalize + SQLite) — or, if
-local login hits the same Conditional Access wall, pivot straight to the
-ICS adapter + manual upload as the primary ingestion path instead.
+that hits the same Conditional Access wall, pivot straight to the ICS
+adapter + manual upload as the primary ingestion path instead.

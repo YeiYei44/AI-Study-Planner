@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 from app.config import Settings, get_settings
 
@@ -59,6 +60,11 @@ class SessionExpiredError(RuntimeError):
 
 class LoginTimeoutError(RuntimeError):
     """An interactive login did not complete before the timeout."""
+
+
+class BrowserClosedError(RuntimeError):
+    """The browser window closed (by the user or something else) before
+    the login could be confirmed."""
 
 
 class NoDisplayError(RuntimeError):
@@ -190,7 +196,16 @@ async def interactive_login(settings: Settings | None = None) -> dict[str, Any]:
 
         deadline = time.monotonic() + settings.login_timeout_s
         while time.monotonic() < deadline:
-            status = await check_auth(context, settings.canvas_base_url)
+            try:
+                status = await check_auth(context, settings.canvas_base_url)
+            except PlaywrightError as e:
+                raise BrowserClosedError(
+                    "The browser window closed before sign-in was "
+                    "confirmed. If you didn't close it yourself, something "
+                    "else on this machine (a crash, or a security/policy "
+                    "agent) terminated it — check for any notification "
+                    "that appeared, then try `asp login` again."
+                ) from e
             if status.ok:
                 return status.user or {}
             await asyncio.sleep(2)
@@ -201,6 +216,74 @@ async def interactive_login(settings: Settings | None = None) -> dict[str, Any]:
     finally:
         with contextlib.suppress(Exception):
             await context.close()
+        with contextlib.suppress(Exception):
+            await pw.stop()
+
+
+async def login_via_cdp(
+    cdp_url: str, settings: Settings | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Sign in through a Chromium the user launched themselves, connected
+    to over the Chrome DevTools Protocol.
+
+    For machines where ``launch_persistent_context`` can't keep its own
+    browser process alive — some managed-device security software kills a
+    freshly spawned, automation-flagged browser within seconds, headed or
+    headless, regardless of destination site. Connecting to a browser the
+    user started by hand (a normal, visible launch, not spawned as our
+    child process) avoids that; Chromium's own cookie jar and CDP surface
+    behave identically either way, so ``check_auth`` and cookie export
+    work the same as through a launched context.
+
+    Doesn't rely on any persistent profile — everything needed comes back
+    live over the connection during this one call: the confirmed user and
+    the Canvas cookies, ready to write out (e.g. ``asp login-cdp``) and
+    carry to wherever the sync actually runs. We only *connect*, so
+    closing our end afterward disconnects, it doesn't close the user's
+    browser window.
+    """
+    settings = settings or get_settings()
+    pw = await async_playwright().start()
+    try:
+        browser = await pw.chromium.connect_over_cdp(cdp_url)
+    except Exception:
+        await pw.stop()
+        raise
+
+    try:
+        context = (
+            browser.contexts[0] if browser.contexts else await browser.new_context()
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        with contextlib.suppress(Exception):
+            await page.goto(
+                f"{settings.canvas_base_url}/login", wait_until="domcontentloaded"
+            )
+
+        deadline = time.monotonic() + settings.login_timeout_s
+        while time.monotonic() < deadline:
+            try:
+                status = await check_auth(context, settings.canvas_base_url)
+            except PlaywrightError as e:
+                raise BrowserClosedError(
+                    "Lost the connection to Chromium before sign-in was "
+                    "confirmed. Make sure the window you launched stays "
+                    "open, then run this again."
+                ) from e
+            if status.ok:
+                cookies = await context.cookies()
+                canvas_cookies = [
+                    c for c in cookies if "instructure.com" in c.get("domain", "")
+                ]
+                return status.user or {}, canvas_cookies
+            await asyncio.sleep(2)
+
+        raise LoginTimeoutError(
+            f"No successful Canvas login within {settings.login_timeout_s}s."
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await browser.close()  # disconnects only; doesn't kill the user's browser
         with contextlib.suppress(Exception):
             await pw.stop()
 

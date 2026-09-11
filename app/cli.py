@@ -3,6 +3,7 @@ and API client — it proves we can pull every assignment across every
 course reliably before anything is built on top.
 
     asp login              # sign in (visible browser), stores the session
+    asp login-cdp F        # sign in via a Chromium you launch yourself
     asp export-cookies F   # write the session to a small JSON file
     asp import-cookies F   # headless boxes: load a session from that file
     asp whoami             # is the stored session still valid?
@@ -10,7 +11,9 @@ course reliably before anything is built on top.
 
 `login` needs a real display. On a box without one: run `login` (and
 `export-cookies`) on a machine that has one, move the resulting file over,
-and `import-cookies` it here.
+and `import-cookies` it here. If Playwright can't keep its own browser
+process alive on that machine either (security software terminating it),
+use `login-cdp` instead — it connects to a Chromium you start by hand.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from playwright.async_api import Error as PlaywrightError
 from rich.console import Console
 from rich.table import Table
 
@@ -30,12 +34,14 @@ from app.config import get_settings
 from app.ingest.canvas import CanvasClient
 from app.ingest.cookies import filter_domain, load_cookies
 from app.ingest.session import (
+    BrowserClosedError,
     CanvasSession,
     LoginTimeoutError,
     NoDisplayError,
     SessionExpiredError,
     install_cookies,
     interactive_login,
+    login_via_cdp,
 )
 
 app = typer.Typer(add_completion=False, help="AI Study Planner - ingestion CLI")
@@ -52,7 +58,7 @@ def login() -> None:
     )
     try:
         user = asyncio.run(interactive_login(settings))
-    except (LoginTimeoutError, NoDisplayError) as e:
+    except (LoginTimeoutError, NoDisplayError, BrowserClosedError) as e:
         console.print(f"[yellow]{e}[/]")
         raise typer.Exit(1)
     console.print(
@@ -90,6 +96,58 @@ async def _export_cookies() -> list[dict]:
     async with CanvasSession() as s:
         cookies = await s.context.cookies()
     return [c for c in cookies if "instructure.com" in c.get("domain", "")]
+
+
+@app.command("login-cdp")
+def login_cdp(
+    out: Path = typer.Argument(
+        Path("canvas-cookies.json"),
+        help="Where to write the exported cookies once signed in",
+    ),
+    cdp_url: str = typer.Option(
+        "http://localhost:9222", "--cdp-url", help="Chromium's debugging endpoint"
+    ),
+) -> None:
+    """Sign in via a Chromium you launch yourself, for machines where
+    Playwright can't keep its own browser process alive (security
+    software on a managed device killing a freshly spawned automated
+    browser within seconds).
+
+    First, launch Playwright's own Chromium by hand with a debugging
+    port open. On Windows PowerShell:
+
+    \b
+        $chromium = (Get-ChildItem "$env:LOCALAPPDATA\ms-playwright\chromium-*\chrome-win64\chrome.exe" | Select-Object -First 1).FullName
+        & $chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check about:blank
+
+    Leave that window open, then run this command. It connects to that
+    browser, navigates it to the Canvas login, waits for you to sign in,
+    and writes the resulting session to `out`. We only connect — closing
+    this command doesn't close your browser window.
+    """
+    settings = get_settings()
+    console.print(f"Connecting to Chromium at [cyan]{cdp_url}[/]...")
+    try:
+        user, cookies = asyncio.run(login_via_cdp(cdp_url, settings))
+    except (LoginTimeoutError, BrowserClosedError) as e:
+        console.print(f"[yellow]{e}[/]")
+        raise typer.Exit(1)
+    except PlaywrightError as e:
+        console.print(
+            f"[red]Couldn't connect to {cdp_url} — is Chromium running "
+            f"with --remote-debugging-port open? ({e})[/]"
+        )
+        raise typer.Exit(1)
+
+    out.write_text(json.dumps(cookies, indent=2))
+    console.print(
+        f"[green]Signed in as {user.get('name')} (id {user.get('id')}). "
+        f"Wrote {len(cookies)} cookies to {out}.[/]"
+    )
+    console.print(
+        f"[dim]Move it into the Codespace and run "
+        f"`asp import-cookies {out.name}` there.[/]"
+    )
 
 
 @app.command("import-cookies")
