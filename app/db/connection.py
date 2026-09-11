@@ -14,6 +14,8 @@ from app.db.schema import SCHEMA_SQL
 _COLUMN_MIGRATIONS = [
     ("estimates", "minutes_p80", "INTEGER"),
     ("estimates", "content_hash", "TEXT"),
+    ("materials", "assignment_id", "INTEGER REFERENCES assignments(id)"),
+    ("materials", "content_hash", "TEXT"),
 ]
 
 

@@ -15,8 +15,14 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app.tutor.embed import cosine_similarity, deserialize_embedding, embed_query
+
+# Cap on the always-included digest so a long semester's worth of
+# assignments (112, on the real account) doesn't dominate the prompt —
+# soonest-due first, since those are what a "what's due" question means.
+DEFAULT_DIGEST_LIMIT = 30
 
 # 8, not 5: found against real data that a genuinely relevant chunk can
 # rank just outside a tighter cutoff even after hybrid fusion (moved from
@@ -39,14 +45,19 @@ _STOPWORDS = {
 }
 
 _ANSWER_PROMPT = """\
-You are a study tutor. Answer the student's question using ONLY the excerpts below — \
-don't use outside knowledge, even if you're confident it's correct. If the excerpts \
-don't contain the answer, say so plainly rather than guessing.
+You are a study tutor. Answer the student's question using ONLY the information below — \
+don't use outside knowledge, even if you're confident it's correct. If it doesn't contain \
+the answer, say so plainly rather than guessing.
 
-Each excerpt is labeled with its source in brackets, e.g. [Periodic Trends Notes, page 3] \
-or just [Bonding Slides] when there's no page or slide number. After every claim, cite it \
-using that exact label in parentheses — for example: "(Periodic Trends Notes, page 3)". \
-Copy the label exactly as shown; never write the literal words "page_ref" or "Title".
+Upcoming assignments (always current — use this for any question about what's due, when, \
+or how many points something is worth; it needs no citation, it isn't an excerpt):
+{assignment_digest}
+
+Excerpts from course materials and assignment descriptions, each labeled with its source in \
+brackets, e.g. [Periodic Trends Notes, page 3] or just [Tee Shirt Contest] when there's no \
+page/slide number. After every claim drawn from one, cite it using that exact label in \
+parentheses — for example: "(Periodic Trends Notes, page 3)". Copy the label exactly as \
+shown; never write the literal words "page_ref" or "Title".
 
 Excerpts:
 {excerpts}
@@ -161,14 +172,65 @@ def _format_excerpts(chunks: list[RetrievedChunk]) -> str:
     return "\n\n".join(parts)
 
 
+def _format_due(due_at: str) -> str:
+    try:
+        dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+    except ValueError:
+        return due_at
+    return dt.strftime("%a %b %d, %I:%M %p UTC").replace(" 0", " ")
+
+
+def assignment_digest(
+    conn: sqlite3.Connection, now: datetime | None = None, limit: int = DEFAULT_DIGEST_LIMIT
+) -> str:
+    """Soonest-due-first plain-text list of not-yet-due published
+    assignments — deliberately *not* retrieval-based. A dense embedding
+    ranks a chunk by topical similarity, which is a poor match for "what's
+    due this week": every assignment's material chunk is topically
+    similar to that question, so nothing here should depend on the
+    question's wording at all. Always computed fresh, not cached — it's a
+    handful of indexed rows, not worth content-hashing like the
+    assignment *materials* are.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = conn.execute(
+        "SELECT a.name, a.due_at, a.points_possible, c.name AS course_name "
+        "FROM assignments a JOIN courses c ON c.id = a.course_id "
+        "WHERE a.workflow_state = 'published' AND a.due_at IS NOT NULL "
+        "ORDER BY a.due_at ASC"
+    ).fetchall()
+
+    lines = []
+    for r in rows:
+        try:
+            due = datetime.fromisoformat(r["due_at"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if due < now:
+            continue
+        points = (
+            f"{r['points_possible']:g} pts" if r["points_possible"] is not None else "points unspecified"
+        )
+        lines.append(f"- {r['name']} ({r['course_name']}): due {_format_due(r['due_at'])}, {points}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines)
+
+
 async def ask(conn: sqlite3.Connection, backend, question: str, top_k: int = DEFAULT_TOP_K) -> AnswerResult:
     chunks = retrieve(conn, question, top_k=top_k)
-    if not chunks:
+    digest = assignment_digest(conn)
+    if not chunks and not digest:
         return AnswerResult(
-            answer="No materials uploaded yet — nothing to answer from. "
-            "Add some with `material add <file>` first.",
+            answer="No materials uploaded and no upcoming assignments synced yet — "
+            "nothing to answer from. Add materials with `material add <file>`, or run "
+            "`sync` to pull assignments.",
             sources=[],
         )
-    prompt = _ANSWER_PROMPT.format(excerpts=_format_excerpts(chunks), question=question)
+    prompt = _ANSWER_PROMPT.format(
+        assignment_digest=digest or "(none)",
+        excerpts=_format_excerpts(chunks) if chunks else "(none retrieved for this question)",
+        question=question,
+    )
     answer = await backend.answer(prompt)
     return AnswerResult(answer=answer, sources=chunks)

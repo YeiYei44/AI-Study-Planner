@@ -77,6 +77,7 @@ from app.planner.calibration import MIN_SAMPLES, multipliers_by_type
 from app.planner.estimate import set_estimate
 from app.planner.llm_estimate import BackendConfigError, make_backend, run_llm_estimates
 from app.planner.schedule import generate_plan, write_plan
+from app.tutor.assignment_sync import sync_assignment_materials
 from app.tutor.extract import UnsupportedFileType
 from app.tutor.materials import add_material
 from app.tutor.qa import DEFAULT_TOP_K
@@ -338,11 +339,17 @@ async def _sync(save_raw: bool) -> None:
             total_assignments,
             changes,
         )
+        console.print("Indexing assignments for the tutor...")
+        mat_result = sync_assignment_materials(conn)
     finally:
         conn.close()
 
     _print_summary(courses, by_course)
     _print_changes(changes)
+    console.print(
+        f"[dim]Tutor index: {mat_result.embedded} updated, "
+        f"{mat_result.skipped_cached} unchanged, {mat_result.removed} removed.[/]"
+    )
     console.print(f"[dim]Stored in {settings.db_path}[/]")
 
 

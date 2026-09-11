@@ -116,11 +116,19 @@ CREATE INDEX IF NOT EXISTS idx_plan_blocks_date ON plan_blocks(date);
 
 -- Manually-uploaded course material (syllabi, slides, notes) — Canvas
 -- access alone was never going to cover lecture content. course_id is
--- nullable: not everything ties cleanly to one course.
+-- nullable: not everything ties cleanly to one course. kind='assignment'
+-- rows are synthesized from an assignment's own name/description/due
+-- date/points (see tutor/assignment_sync.py) rather than uploaded, so
+-- the tutor can answer questions about assignment content too, not just
+-- files you hand it — assignment_id links back to which one, and
+-- content_hash (same caching pattern as estimate-llm's) means an
+-- assignment sync only re-embeds ones that actually changed. Both
+-- columns were added after this table's first release — see
+-- connection.py's migration.
 CREATE TABLE IF NOT EXISTS materials (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id       INTEGER REFERENCES courses(id),
-    kind            TEXT NOT NULL,     -- 'syllabus' | 'slides' | 'notes' | 'file'
+    kind            TEXT NOT NULL,     -- 'syllabus' | 'slides' | 'notes' | 'file' | 'assignment'
     title           TEXT NOT NULL,
     source_path     TEXT,
     added_at        TEXT NOT NULL

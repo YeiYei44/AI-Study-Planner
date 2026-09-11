@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from app.config import Settings
 from app.db.connection import connect
 from app.tutor.embed import serialize_embedding
-from app.tutor.qa import _fts_query, ask, retrieve
+from app.tutor.qa import _fts_query, ask, assignment_digest, retrieve
 
 
 @pytest.fixture
@@ -14,6 +15,22 @@ def conn(tmp_path: Path):
     c = connect(Settings(data_dir=tmp_path))
     yield c
     c.close()
+
+
+def _insert_assignment(conn, aid, name, due_at, points=50, workflow_state="published"):
+    conn.execute(
+        "INSERT INTO courses (id, name, source, raw_json, fetched_at) "
+        "VALUES (1, 'Chem', 's', '{}', 't') ON CONFLICT(id) DO NOTHING"
+    )
+    conn.execute(
+        """
+        INSERT INTO assignments
+            (id, course_id, name, due_at, points_possible, workflow_state, source, raw_json, fetched_at)
+        VALUES (?, 1, ?, ?, ?, ?, 's', '{}', 't')
+        """,
+        (aid, name, due_at, points, workflow_state),
+    )
+    conn.commit()
 
 
 def _insert_material_with_chunk(conn, mid, title, text, page_ref, embedding):
@@ -134,3 +151,66 @@ def test_pure_dense_query_still_works_when_no_lexical_terms(conn, monkeypatch):
 
     results = retrieve(conn, "is the", top_k=5)  # all stopwords
     assert results[0].material_title == "Close"
+
+
+# -- assignment digest — always-included, not retrieval-based --------------
+# Deliberately separate from chunk retrieval: a "what's due" question has
+# no lexical/semantic reason to prefer one assignment's material chunk
+# over another's, so this can't rely on ranking at all.
+
+_NOW = datetime(2026, 1, 10, tzinfo=timezone.utc)
+
+
+def test_digest_lists_future_assignments_soonest_first(conn):
+    _insert_assignment(conn, 1, "Later", "2026-01-20T23:59:00Z", points=10)
+    _insert_assignment(conn, 2, "Sooner", "2026-01-12T23:59:00Z", points=20)
+    digest = assignment_digest(conn, now=_NOW)
+    assert digest.index("Sooner") < digest.index("Later")
+
+
+def test_digest_excludes_past_due(conn):
+    _insert_assignment(conn, 1, "AlreadyDue", "2026-01-01T23:59:00Z")
+    digest = assignment_digest(conn, now=_NOW)
+    assert "AlreadyDue" not in digest
+
+
+def test_digest_excludes_unpublished(conn):
+    _insert_assignment(conn, 1, "Draft", "2026-01-20T23:59:00Z", workflow_state="unpublished")
+    digest = assignment_digest(conn, now=_NOW)
+    assert "Draft" not in digest
+
+
+def test_digest_includes_course_due_date_and_points(conn):
+    _insert_assignment(conn, 1, "Essay", "2026-01-20T23:59:00Z", points=90)
+    digest = assignment_digest(conn, now=_NOW)
+    assert "Essay" in digest
+    assert "Chem" in digest
+    assert "90 pts" in digest
+
+
+def test_digest_respects_limit(conn):
+    for i in range(5):
+        _insert_assignment(conn, i, f"A{i}", f"2026-01-{12+i}T23:59:00Z")
+    digest = assignment_digest(conn, now=_NOW, limit=2)
+    assert len(digest.splitlines()) == 2
+
+
+def test_ask_includes_digest_in_prompt_even_with_no_chunks(conn):
+    _insert_assignment(conn, 1, "Lab Report", "2099-01-01T23:59:00Z", points=30)
+    backend = _FakeAnswerBackend()
+
+    result = asyncio.run(ask(conn, backend, "what's due soon?"))
+    assert backend.last_prompt is not None
+    assert "Lab Report" in backend.last_prompt
+    assert result.sources == []  # no materials/chunks were retrieved
+
+
+def test_ask_includes_digest_alongside_retrieved_chunks(conn, monkeypatch):
+    monkeypatch.setattr("app.tutor.qa.embed_query", lambda text: [1.0, 0.0, 0.0])
+    _insert_assignment(conn, 1, "Lab Report", "2099-01-01T23:59:00Z", points=30)
+    _insert_material_with_chunk(conn, 1, "Notes", "some notes text", "page 1", [1.0, 0.0, 0.0])
+    backend = _FakeAnswerBackend()
+
+    asyncio.run(ask(conn, backend, "question?"))
+    assert "Lab Report" in backend.last_prompt
+    assert "[Notes, page 1]" in backend.last_prompt
