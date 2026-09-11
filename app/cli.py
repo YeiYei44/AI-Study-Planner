@@ -25,6 +25,8 @@ Tutor:
     python -m app.cli material list
     python -m app.cli ask "<question>"   # cited Q&A over your uploaded materials
 
+    python -m app.cli tui                # dashboard + plan + assignments + tutor chat + calibration + settings
+
 `login` needs a real display. On a box without one: run `login` (and
 `export-cookies`) on a machine that has one, move the resulting file over,
 and `import-cookies` it here. If Playwright can't keep its own browser
@@ -790,6 +792,18 @@ def ask(
         for s in result.sources:
             ref = f"{s.material_title}, {s.page_ref}" if s.page_ref else s.material_title
             console.print(f"  [dim]({s.score:.2f}) {esc(ref)}[/]")
+
+
+@app.command()
+def tui() -> None:
+    """Dashboard, plan, assignments (estimate/complete/log), a
+    persistent tutor chat, calibration, and availability settings, in
+    one interactive screen. Login/cookies/material-add stay CLI-only —
+    they're one-shot browser/file operations, not interactive ones.
+    """
+    from app.tui.app import StudyPlannerApp  # lazy: only `tui` needs textual
+
+    StudyPlannerApp().run()
 
 
 if __name__ == "__main__":
