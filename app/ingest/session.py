@@ -136,8 +136,8 @@ class CanvasSession:
         if not status.ok:
             await self._shutdown()
             raise SessionExpiredError(
-                "Canvas session expired or missing. Run `asp login` "
-                "(or `asp import-cookies <file>` on a headless box)."
+                "Canvas session expired or missing. Run `python -m app.cli login` "
+                "(or `python -m app.cli import-cookies <file>` on a headless box)."
             )
         self.user = status.user
         return self
@@ -166,11 +166,11 @@ async def interactive_login(settings: Settings | None = None) -> dict[str, Any]:
 
     if not _has_display():
         raise NoDisplayError(
-            "`asp login` needs a visible browser, but this machine has no "
+            "`python -m app.cli login` needs a visible browser, but this machine has no "
             "display.\nOn a Codespace / headless server, instead:\n"
-            "  - asp import-cookies <file>   (export Canvas cookies from "
+            "  - python -m app.cli import-cookies <file>   (export Canvas cookies from "
             "your normal browser)\n"
-            "  - or run `asp login` on your own laptop/desktop"
+            "  - or run `python -m app.cli login` on your own laptop/desktop"
         )
 
     _clear_stale_singleton_locks(settings.browser_profile_dir)
@@ -204,7 +204,7 @@ async def interactive_login(settings: Settings | None = None) -> dict[str, Any]:
                     "confirmed. If you didn't close it yourself, something "
                     "else on this machine (a crash, or a security/policy "
                     "agent) terminated it — check for any notification "
-                    "that appeared, then try `asp login` again."
+                    "that appeared, then try `python -m app.cli login` again."
                 ) from e
             if status.ok:
                 return status.user or {}
@@ -237,7 +237,7 @@ async def login_via_cdp(
 
     Doesn't rely on any persistent profile — everything needed comes back
     live over the connection during this one call: the confirmed user and
-    the Canvas cookies, ready to write out (e.g. ``asp login-cdp``) and
+    the Canvas cookies, ready to write out (e.g. ``python -m app.cli login-cdp``) and
     carry to wherever the sync actually runs. We only *connect*, so
     closing our end afterward disconnects, it doesn't close the user's
     browser window.

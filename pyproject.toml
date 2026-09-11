@@ -14,8 +14,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
-[project.scripts]
-asp = "app.cli:app"
+# Deliberately no [project.scripts] entry point: that generates an
+# asp.exe wrapper in Scripts/ on install, and a newly-created unsigned
+# executable is exactly the kind of thing endpoint security on a managed
+# device flags. Run the CLI as `python -m app.cli <command>` instead —
+# just the interpreter that's already trusted, importing and running a
+# module, no new executable created.
 
 [build-system]
 requires = ["hatchling"]

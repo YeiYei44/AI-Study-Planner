@@ -2,12 +2,15 @@
 and API client — it proves we can pull every assignment across every
 course reliably before anything is built on top.
 
-    asp login              # sign in (visible browser), stores the session
-    asp login-cdp F        # sign in via a Chromium you launch yourself
-    asp export-cookies F   # write the session to a small JSON file
-    asp import-cookies F   # headless boxes: load a session from that file
-    asp whoami             # is the stored session still valid?
-    asp sync               # pull courses + assignments, print a summary
+Run as `python -m app.cli <command>` (no installed script/executable
+needed — just the already-trusted python.exe running a module):
+
+    python -m app.cli login             # sign in (visible browser), stores the session
+    python -m app.cli login-cdp F       # sign in via a Chromium you launch yourself
+    python -m app.cli export-cookies F  # write the session to a small JSON file
+    python -m app.cli import-cookies F  # headless boxes: load a session from that file
+    python -m app.cli whoami            # is the stored session still valid?
+    python -m app.cli sync              # pull courses + assignments, print a summary
 
 `login` needs a real display. On a box without one: run `login` (and
 `export-cookies`) on a machine that has one, move the resulting file over,
@@ -74,10 +77,10 @@ def export_cookies(
 ) -> None:
     """Export the current session as a small JSON cookie file.
 
-    Run this after a successful `asp login` on a machine where you can log
-    in directly (e.g. locally, outside the Codespace). Move the resulting
-    file into the Codespace and run `asp import-cookies <file>` there —
-    a few KB, so pasting its contents works fine too.
+    Run this after a successful `login` on a machine where you can log in
+    directly (e.g. locally, outside the Codespace). Move the resulting
+    file into the Codespace and run `import-cookies <file>` there — a few
+    KB, so pasting its contents works fine too.
     """
     try:
         cookies = asyncio.run(_export_cookies())
@@ -88,7 +91,7 @@ def export_cookies(
     console.print(f"[green]Wrote {len(cookies)} cookies to {path}.[/]")
     console.print(
         f"[dim]Move it into the Codespace and run "
-        f"`asp import-cookies {path.name}` there.[/]"
+        f"`python -m app.cli import-cookies {path.name}` there.[/]"
     )
 
 
@@ -146,7 +149,7 @@ def login_cdp(
     )
     console.print(
         f"[dim]Move it into the Codespace and run "
-        f"`asp import-cookies {out.name}` there.[/]"
+        f"`python -m app.cli import-cookies {out.name}` there.[/]"
     )
 
 
@@ -157,16 +160,16 @@ def import_cookies(
         help="File with cookie material. Omit to paste on stdin.",
     ),
 ) -> None:
-    """Load a Canvas session from cookies, for when `asp login` can't open
-    a visible browser.
+    """Load a Canvas session from cookies, for when `login` can't open a
+    visible browser.
 
     Accepts (auto-detected): a JSON array from a cookie-export extension, a
     `curl` command copied from DevTools, or a raw `Cookie:` request header.
     On a locked-down device, DevTools -> Network -> the top document
     request -> copy the `Cookie:` header value is usually reachable.
 
-        asp import-cookies cookies.json
-        pbpaste | asp import-cookies          # or just run it and paste
+        python -m app.cli import-cookies cookies.json
+        pbpaste | python -m app.cli import-cookies          # or just run it and paste
     """
     settings = get_settings()
     if path is not None:

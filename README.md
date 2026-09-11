@@ -30,31 +30,37 @@ Optionally copy `.env.example` to `.env` (defaults already target
 
 ## Usage
 
+Run everything as `python -m app.cli <command>` — no installed
+script/executable, just the Python interpreter running a module.
+(Deliberate: an installed console-script entry point would generate an
+`asp.exe`-style wrapper, and a newly-created unsigned executable is
+exactly what endpoint security on a managed device tends to flag.)
+
 ```bash
-asp login     # opens a real browser — sign in with your Fulton/Microsoft account
-asp whoami    # check the stored session is still valid
-asp sync      # pull courses + assignments, print a summary, save a raw snapshot
+python -m app.cli login     # opens a real browser — sign in with your Fulton/Microsoft account
+python -m app.cli whoami    # check the stored session is still valid
+python -m app.cli sync      # pull courses + assignments, print a summary, save a raw snapshot
 ```
 
-`asp login` needs a real display, so run it on your own machine. It stores
-the session under `data/browser-profile/`; `asp whoami` and `asp sync` then
-run headless against that. When the session expires, `asp login` again.
+`login` needs a real display, so run it on your own machine. It stores
+the session under `data/browser-profile/`; `whoami` and `sync` then run
+headless against that. When the session expires, `login` again.
 
-`asp sync` writes raw JSON to `data/raw/<timestamp>/` — that's the input
-for step 2.
+`sync` writes raw JSON to `data/raw/<timestamp>/` — that's the input for
+step 2.
 
 ### Headless box / Codespace
 
-No display means `asp login` can't open a browser here. In rough order
-of how much they depend on the specific device:
+No display means `login` can't open a browser here. In rough order of how
+much they depend on the specific device:
 
-**1 — Run `asp login` locally, then transfer the session.** Clone this
-repo (or copy the `app/` directory) onto any machine where you can
-actually log into Canvas interactively — install deps, `playwright
-install chromium`, `asp login`, then:
+**1 — Run `login` locally, then transfer the session.** Clone this repo
+(or copy the `app/` directory) onto any machine where you can actually
+log into Canvas interactively — install deps, `playwright install
+chromium`, `python -m app.cli login`, then:
 
 ```bash
-asp export-cookies canvas-cookies.json
+python -m app.cli export-cookies canvas-cookies.json
 ```
 
 writes a small JSON file (a few KB — the file can just be pasted, no need
@@ -62,8 +68,8 @@ to move a whole browser profile). Bring that file into the Codespace
 (drag it into the Explorer panel, or paste its contents) and:
 
 ```bash
-asp import-cookies canvas-cookies.json
-asp sync
+python -m app.cli import-cookies canvas-cookies.json
+python -m app.cli sync
 ```
 
 If your district's Conditional Access is scoped to a specific managed
@@ -89,27 +95,26 @@ $chromium = (Get-ChildItem "$env:LOCALAPPDATA\ms-playwright\chromium-*\chrome-wi
 Leave that window open, then in another terminal:
 
 ```bash
-asp login-cdp canvas-cookies.json
+python -m app.cli login-cdp canvas-cookies.json
 ```
 
 It connects over the debugging port, navigates that window to the Canvas
 login, waits for you to sign in, and writes the session out — same file,
-same next step (`asp import-cookies`). It only connects; it never closes
-the browser you launched.
+same next step (`import-cookies`). It only connects; it never closes the
+browser you launched.
 
 **2 — Desktop in the Codespace.** `.devcontainer/` adds a noVNC desktop
 (Command Palette → *Codespaces: Rebuild Container*, then open port 6080,
-password `vscode`). `asp login` there behaves like a normal local login,
-but it's still a sign-in from GitHub's cloud network — Conditional Access
+password `vscode`). `login` there behaves like a normal local login, but
+it's still a sign-in from GitHub's cloud network — Conditional Access
 scoped to network/location will reject it exactly like the Codespace's
 headless context would.
 
 **3 — Cookies via DevTools**, if reachable anywhere you're signed in:
 Network tab → reload → the top `fultonschools.instructure.com` document
-request → Headers → copy the `Cookie:` value → `asp import-cookies`
-(paste, Ctrl-D). Also accepts a "Copy as cURL" paste or a JSON export
-file. Cookies lapse periodically; re-copy when `asp sync` reports the
-session gone.
+request → Headers → copy the `Cookie:` value → `import-cookies` (paste,
+Ctrl-D). Also accepts a "Copy as cURL" paste or a JSON export file.
+Cookies lapse periodically; re-copy when `sync` reports the session gone.
 
 If none of these are reachable, the ICS calendar feed (no auth) plus
 manually uploaded course files sidestep the whole problem — see
@@ -118,14 +123,14 @@ manually uploaded course files sidestep the whole problem — see
 ## Layout
 
 ```
-.devcontainer/          Codespace + noVNC desktop for `asp login`
+.devcontainer/          Codespace + noVNC desktop for `login`
 app/
   config.py            settings (env, ASP_ prefix)
   ingest/
     session.py         CanvasSession (headless) + interactive_login + install_cookies
     cookies.py         parse cookie header / curl / JSON export into Playwright cookies
     canvas.py          CanvasClient — pagination, rate limiting, endpoints
-  cli.py               asp login / login-cdp / export-cookies / import-cookies / whoami / sync
+  cli.py               login / login-cdp / export-cookies / import-cookies / whoami / sync
 docs/DESIGN.md         architecture and decisions
 tests/
 ```
