@@ -5,9 +5,13 @@ Three groups, in this order: **missing** (past due, not done — the most
 urgent, so they sort to the very top regardless of how the rest of the
 table is ordered), the regular upcoming/undated list, then **completed**
 at the bottom, out of the way once it's done. Plain header rows (a label
-in the Assignment column, keyed "header-*" rather than an assignment id)
-mark the boundaries — `_selected_assignment_id()` returns None for them,
-so an action pressed on a header row is a no-op rather than a crash.
+in the Assignment column, keyed "header-*" rather than an assignment id,
+each labeled with its own count) mark the boundaries —
+`_selected_assignment_id()` returns None for them, so an action pressed
+on a header row is a no-op rather than a crash. An "UPCOMING (n)" header
+also appears — but only when MISSING is present above it — so a MISSING
+section is never mistaken for "everything below this is also missing";
+with no MISSING section the plain list needs no boundary marker at all.
 
 Uses ``push_screen_wait`` (an async call inside a ``@work`` method) for
 the input prompts rather than callback-passing: chaining "read minutes,
@@ -93,13 +97,28 @@ class AssignmentsPane(Vertical):
             (missing if due is not None and due < now else upcoming).append(a)
 
         if missing:
-            table.add_row("", "", Text("⚠ MISSING", style="bold red"), "", "", "", key="header-missing")
+            table.add_row(
+                "", "", Text(f"⚠ MISSING ({len(missing)})", style="bold red"),
+                "", "", "", key="header-missing",
+            )
             for a in missing:
                 self._add_row(table, a)
+            # Only needed as a boundary marker once there's a MISSING
+            # section above it to be confused with — otherwise "row 0
+            # is the first real item" stays true, which every other
+            # action (and the cursor-preserving move_cursor below)
+            # already assumes.
+            table.add_row(
+                "", "", Text(f"UPCOMING ({len(upcoming)})", style="bold"),
+                "", "", "", key="header-upcoming",
+            )
         for a in upcoming:
             self._add_row(table, a)
         if completed:
-            table.add_row("", "", Text("✓ COMPLETED", style="bold dim"), "", "", "", key="header-completed")
+            table.add_row(
+                "", "", Text(f"✓ COMPLETED ({len(completed)})", style="bold dim"),
+                "", "", "", key="header-completed",
+            )
             for a in completed:
                 self._add_row(table, a)
 

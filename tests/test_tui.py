@@ -391,10 +391,13 @@ async def test_assignments_missing_group_sorts_to_top(conn, settings):
         table = app.query_one("#assignments-table", DataTable)
         cols = list(table.columns.keys())
         row_keys = list(table.rows.keys())
-        # header row, then the overdue assignment, then the future one
-        assert table.get_cell(row_keys[0], cols[2]).plain == "⚠ MISSING"
+        # MISSING header, the overdue assignment, an UPCOMING boundary
+        # header (only shown because MISSING is present — otherwise
+        # "Future" could be mistaken for also being missing), then Future.
+        assert table.get_cell(row_keys[0], cols[2]).plain == "⚠ MISSING (1)"
         assert table.get_cell(row_keys[1], cols[2]) == "Overdue"
-        assert table.get_cell(row_keys[2], cols[2]) == "Future"
+        assert table.get_cell(row_keys[2], cols[2]).plain == "UPCOMING (1)"
+        assert table.get_cell(row_keys[3], cols[2]) == "Future"
 
 
 async def test_assignments_completed_group_sorts_to_bottom(conn, settings):
@@ -412,8 +415,46 @@ async def test_assignments_completed_group_sorts_to_bottom(conn, settings):
         cols = list(table.columns.keys())
         row_keys = list(table.rows.keys())
         assert table.get_cell(row_keys[0], cols[2]) == "NotDone"
-        assert table.get_cell(row_keys[1], cols[2]).plain == "✓ COMPLETED"
+        assert table.get_cell(row_keys[1], cols[2]).plain == "✓ COMPLETED (1)"
         assert table.get_cell(row_keys[2], cols[2]) == "Done"
+
+
+async def test_assignments_no_upcoming_header_when_nothing_is_missing(conn, settings):
+    # The boundary marker only earns its place when there's a MISSING
+    # section it needs to be distinguished from — a plain upcoming-only
+    # list (the common case) shouldn't grow extra chrome for a boundary
+    # that can't be ambiguous in the first place.
+    _seed_course_and_assignment(conn, aid=1, name="Future", due="2099-01-01T00:00:00Z")
+    app = StudyPlannerApp(settings=settings, conn=conn)
+    async with app.run_test() as pilot:
+        await _click_tab(pilot, "assignments-tab")
+        from textual.widgets import DataTable
+
+        table = app.query_one("#assignments-table", DataTable)
+        assert table.row_count == 1
+        row_keys = list(table.rows.keys())
+        cols = list(table.columns.keys())
+        assert table.get_cell(row_keys[0], cols[2]) == "Future"
+
+
+async def test_assignments_upcoming_header_shows_zero_when_all_are_missing(conn, settings):
+    # The exact ambiguity this whole feature was built to resolve: with
+    # every assignment overdue, "UPCOMING (0)" says so explicitly, rather
+    # than leaving it unclear whether there simply are no upcoming items
+    # or whether they got swallowed into the MISSING section above.
+    _seed_course_and_assignment(conn, aid=1, name="Overdue", due="2020-01-01T00:00:00Z")
+    app = StudyPlannerApp(settings=settings, conn=conn)
+    async with app.run_test() as pilot:
+        await _click_tab(pilot, "assignments-tab")
+        from textual.widgets import DataTable
+
+        table = app.query_one("#assignments-table", DataTable)
+        row_keys = list(table.rows.keys())
+        cols = list(table.columns.keys())
+        assert table.get_cell(row_keys[0], cols[2]).plain == "⚠ MISSING (1)"
+        assert table.get_cell(row_keys[1], cols[2]) == "Overdue"
+        assert table.get_cell(row_keys[2], cols[2]).plain == "UPCOMING (0)"
+        assert table.row_count == 3
 
 
 async def test_assignments_header_row_action_is_a_no_op(conn, settings):
