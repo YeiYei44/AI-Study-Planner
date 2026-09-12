@@ -1148,7 +1148,75 @@ same pattern every test fixture in this repo already uses
 
 This closes out the three-part request that opened §13: assignment
 completion (§13), tutor context from assignments (§14), and TUI parity
-(this section). Next: **step 6, spaced review** — FSRS-scheduled cards
-generated from chunks, graded, writing `mastery.theta` back per topic —
-closing the loop described in §8 so weak topics actually pull more of
-the scheduler's attention, not just a static plan.
+(this section).
+
+## 16. Skipping in-class work
+
+Raised by the user after actually using the planner for a while: tests,
+quizzes, and labs graded in person still sync in from Canvas as ordinary
+assignments — Canvas has no field for "this happens in class, don't
+study for it at home" — so they clogged the plan with scheduled prep
+time for things that need none. `complete` doesn't fit: marking one done
+would be false (the student didn't do independent work for it, it just
+hasn't happened yet), and it'd land in the wrong bucket if genuinely
+marked done later.
+
+Checked the real data rather than guessing at a heuristic: assignments
+with `submission_types: ["none"]` (6 of the account's 112) turned out to
+be almost exactly the in-class items — "unit 1 quiz", "unit 1 test," —
+things graded in person with nothing to submit online. Decent evidence
+this signal correlates well for real Canvas gradebooks, but not treated
+as reliable enough to auto-exclude: a genuine take-home reading
+assignment could also have no submission type, and this project's
+running rule (§8, §13, the tutor's citation requirement) is that a wrong
+automatic guess is worse than requiring one manual action — so it stays
+opt-in, a signal for the user to notice and decide on, not something the
+scheduler silently acts on by itself.
+
+**`assignment_status.skip_planning`** — a second, independent flag on
+the same table `completed` already lives on, for the same reason
+(`sync.py`'s upsert would wipe a flag stored directly on `assignments`).
+`app/db/completion.py`'s `set_skip_planning()`/`is_skipped()` mirror
+`set_completed()`/`is_completed()`'s shape exactly, with one real
+difference: skipping *removes* any already-scheduled open (unlocked,
+not-completed) blocks for that assignment outright, rather than marking
+them done — nothing was studied, there's nothing to mark done, just
+nothing left to schedule. Un-skipping doesn't recreate anything; re-run
+`plan`. `generate_plan()` excludes `skip_planning` the same way it
+already excludes `completed` — one more `AND` clause in the same query.
+
+CLI: `skip <id>` / `skip <id> --undo`, same shape as `complete`.
+
+**TUI**: a fourth Assignments-tab group, "⊘ SKIPPED — in-class (n)",
+between UPCOMING and COMPLETED — out of the way like completed work, but
+kept visually distinct from it (skipping isn't "done"). `s` toggles it,
+immediately, no prompt (unlike `c`'s git-commit-style minutes prompt —
+there's nothing to log for something nobody studied for). Classification
+priority, applied in order: completed first (the strongest signal — a
+skipped item that later gets marked done should show as done, not
+skipped), then skipped, then missing/upcoming by due date. The `Done`
+column shows `⊘` for a skipped row, distinct from completed's `✓`.
+
+11 new tests (167 total): `set_skip_planning`/`is_skipped` in isolation
+(unknown-id error, toggle on/off, open-vs-locked block removal, undo
+doesn't remove anything, independent of the `completed` flag), a
+`generate_plan()` pair (excludes a skipped assignment; un-skipping makes
+it schedulable again), and TUI coverage (the group's position and count
+label, the `⊘` marker, no modal on toggle, blocks actually removed,
+un-skip restores it to the plain list).
+
+Verified against the real database: skipped a real in-class item
+("unit 1 quiz," `submission_types: ["none"]`) and confirmed `plan`
+excluded it; separately skipped a real not-yet-completed assignment and
+confirmed the TUI rendered it under "⊘ SKIPPED — in-class (1)" with a
+real scheduled block actually removed. Undid both and restored the
+database to its exact prior state afterward, including cleaning up one
+inert leftover `assignment_status` row (`completed=0, skip_planning=0` —
+functionally identical to no row at all, but not byte-identical) rather
+than leaving it — the pattern established in §13/§15 for any real-data
+verification.
+
+Next: **step 6, spaced review** — FSRS-scheduled cards generated from
+chunks, graded, writing `mastery.theta` back per topic — closing the
+loop described in §8 so weak topics actually pull more of the
+scheduler's attention, not just a static plan.

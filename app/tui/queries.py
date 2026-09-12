@@ -32,16 +32,18 @@ def upcoming_plan_blocks(conn: sqlite3.Connection, days: int = 7) -> list[sqlite
 
 
 def all_assignments_with_status(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every published assignment, joined with its estimate (if any) and
-    completion status — soonest-due first, undated last. Backs the
-    Assignments pane, which is where estimate/complete/log actions live,
-    so unlike `upcoming_assignments` this deliberately doesn't filter out
-    past-due or already-completed rows: those are exactly the ones a
-    user might come here to un-complete or adjust."""
+    """Every published assignment, joined with its estimate (if any),
+    completion, and skip-planning status — soonest-due first, undated
+    last. Backs the Assignments pane, which is where estimate/complete/
+    log/skip actions live, so unlike `upcoming_assignments` this
+    deliberately doesn't filter out past-due, already-completed, or
+    skipped rows: those are exactly the ones a user might come here to
+    undo or adjust."""
     return conn.execute(
         "SELECT a.id, a.due_at, a.name, a.points_possible, c.name AS course_name, "
         "e.minutes AS estimate_minutes, e.basis AS estimate_basis, "
-        "COALESCE(s.completed, 0) AS completed "
+        "COALESCE(s.completed, 0) AS completed, "
+        "COALESCE(s.skip_planning, 0) AS skip_planning "
         "FROM assignments a "
         "JOIN courses c ON c.id = a.course_id "
         "LEFT JOIN estimates e ON e.assignment_id = a.id "

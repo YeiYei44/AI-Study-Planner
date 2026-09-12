@@ -18,6 +18,11 @@ v1 scope, stated plainly:
   is still needed — it'll schedule the assignment's full estimate again
   from scratch rather than the remainder. Only "fully done" is tracked,
   not "X minutes in."
+* an assignment marked skip_planning (same table) is also excluded
+  outright — for in-class work (tests/quizzes/labs graded in person)
+  that syncs in as an ordinary Canvas assignment but needs no home prep
+  time. Canvas has no field for this distinction, so it's a manual flag
+  rather than a guess; see app/db/completion.py and docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -96,7 +101,8 @@ def generate_plan(
         "SELECT a.* FROM assignments a "
         "LEFT JOIN assignment_status s ON s.assignment_id = a.id "
         "WHERE a.due_at IS NOT NULL AND a.workflow_state = 'published' "
-        "AND COALESCE(s.completed, 0) = 0"
+        "AND COALESCE(s.completed, 0) = 0 "
+        "AND COALESCE(s.skip_planning, 0) = 0"
     ).fetchall()
 
     candidates = []

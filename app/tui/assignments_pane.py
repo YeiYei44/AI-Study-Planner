@@ -1,17 +1,25 @@
-"""Assignments: the CLI's `estimate` / `complete` / `log` in one table
-instead of three separate one-shot commands — select a row, press a key.
+"""Assignments: the CLI's `estimate` / `complete` / `log` / `skip` in one
+table instead of four separate one-shot commands — select a row, press
+a key.
 
-Three groups, in this order: **missing** (past due, not done — the most
-urgent, so they sort to the very top regardless of how the rest of the
-table is ordered), the regular upcoming/undated list, then **completed**
-at the bottom, out of the way once it's done. Plain header rows (a label
-in the Assignment column, keyed "header-*" rather than an assignment id,
-each labeled with its own count) mark the boundaries —
-`_selected_assignment_id()` returns None for them, so an action pressed
-on a header row is a no-op rather than a crash. An "UPCOMING (n)" header
-also appears — but only when MISSING is present above it — so a MISSING
-section is never mistaken for "everything below this is also missing";
-with no MISSING section the plain list needs no boundary marker at all.
+Four groups, in this order: **missing** (past due, not done, not
+skipped — the most urgent, so they sort to the very top regardless of
+how the rest of the table is ordered), the regular upcoming/undated
+list, **skipped** (in-class work — tests/quizzes/labs graded in person
+that Canvas still syncs in as an ordinary assignment but that needs no
+home prep time), then **completed** at the bottom, out of the way once
+it's done. A completed assignment is never also shown as missing/
+skipped regardless of its due date or skip flag — completion is the
+strongest signal and takes priority in classification.
+
+Plain header rows (a label in the Assignment column, keyed "header-*"
+rather than an assignment id, each labeled with its own count) mark the
+boundaries — `_selected_assignment_id()` returns None for them, so an
+action pressed on a header row is a no-op rather than a crash. An
+"UPCOMING (n)" header also appears — but only when MISSING is present
+above it — so a MISSING section is never mistaken for "everything below
+this is also missing"; with no MISSING section the plain list needs no
+boundary marker at all.
 
 Uses ``push_screen_wait`` (an async call inside a ``@work`` method) for
 the input prompts rather than callback-passing: chaining "read minutes,
@@ -32,7 +40,7 @@ from textual.containers import Vertical
 from textual.widgets import DataTable, Static
 
 from app.db.completion import UnknownAssignmentError as CompletionUnknownError
-from app.db.completion import set_completed
+from app.db.completion import set_completed, set_skip_planning
 from app.db.sessions import UnknownAssignmentError as SessionUnknownError
 from app.db.sessions import log_session
 from app.planner.estimate import set_estimate
@@ -53,6 +61,7 @@ class AssignmentsPane(Vertical):
     BINDINGS = [
         ("r", "refresh_view", "Refresh"),
         ("c", "toggle_complete", "Toggle done"),
+        ("s", "toggle_skip", "Skip/unskip"),
         ("e", "set_estimate_action", "Set estimate"),
         ("l", "log_time_action", "Log time"),
     ]
@@ -78,7 +87,12 @@ class AssignmentsPane(Vertical):
             est = "-"
         else:
             est = f"{a['estimate_minutes']}m" + (" (you)" if a["estimate_basis"] == "user" else "")
-        done = "✓" if a["completed"] else ""
+        if a["completed"]:
+            done = "✓"
+        elif a["skip_planning"]:
+            done = "⊘"
+        else:
+            done = ""
         table.add_row(due, a["course_name"], a["name"], pts, est, done, key=str(a["id"]))
 
     def action_refresh_view(self, message: str = "") -> None:
@@ -88,13 +102,15 @@ class AssignmentsPane(Vertical):
         table.add_columns("Due", "Course", "Assignment", "Pts", "Estimate", "Done")
 
         now = datetime.now(timezone.utc)
-        missing, upcoming, completed = [], [], []
+        missing, upcoming, skipped, completed = [], [], [], []
         for a in all_assignments_with_status(self._conn):
             if a["completed"]:
                 completed.append(a)
-                continue
-            due = _parse_due(a["due_at"])
-            (missing if due is not None and due < now else upcoming).append(a)
+            elif a["skip_planning"]:
+                skipped.append(a)
+            else:
+                due = _parse_due(a["due_at"])
+                (missing if due is not None and due < now else upcoming).append(a)
 
         if missing:
             table.add_row(
@@ -114,6 +130,13 @@ class AssignmentsPane(Vertical):
             )
         for a in upcoming:
             self._add_row(table, a)
+        if skipped:
+            table.add_row(
+                "", "", Text(f"⊘ SKIPPED — in-class ({len(skipped)})", style="bold yellow"),
+                "", "", "", key="header-skipped",
+            )
+            for a in skipped:
+                self._add_row(table, a)
         if completed:
             table.add_row(
                 "", "", Text(f"✓ COMPLETED ({len(completed)})", style="bold dim"),
@@ -124,7 +147,8 @@ class AssignmentsPane(Vertical):
 
         status = message or (
             f"{len(missing) + len(upcoming)} active ({len(missing)} missing) · "
-            f"{len(completed)} completed. 'c' toggle done, 'e' set estimate, 'l' log time."
+            f"{len(skipped)} skipped · {len(completed)} completed. "
+            "'c' toggle done, 's' skip/unskip, 'e' set estimate, 'l' log time."
         )
         self.query_one("#assignments-status", Static).update(status)
         if table.row_count:
@@ -180,6 +204,27 @@ class AssignmentsPane(Vertical):
             return
         verb = "done" if result.completed else "not done"
         self.action_refresh_view(f'Marked "{esc(result.assignment_name)}" {verb}.{log_note}')
+
+    def action_toggle_skip(self) -> None:
+        aid = self._selected_assignment_id()
+        if aid is None:
+            return
+        row = next((a for a in all_assignments_with_status(self._conn) if a["id"] == aid), None)
+        if row is None:
+            return
+
+        try:
+            result = set_skip_planning(self._conn, aid, skip=not row["skip_planning"])
+        except CompletionUnknownError:
+            return
+
+        if result.skipped:
+            msg = f'"{esc(result.assignment_name)}" will no longer be scheduled.'
+            if result.blocks_removed:
+                msg += f" Removed {result.blocks_removed} block(s)."
+        else:
+            msg = f'"{esc(result.assignment_name)}" will be scheduled normally again.'
+        self.action_refresh_view(msg)
 
     @work(exclusive=True)
     async def action_set_estimate_action(self) -> None:

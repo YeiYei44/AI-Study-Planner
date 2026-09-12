@@ -16,6 +16,7 @@ _COLUMN_MIGRATIONS = [
     ("estimates", "content_hash", "TEXT"),
     ("materials", "assignment_id", "INTEGER REFERENCES assignments(id)"),
     ("materials", "content_hash", "TEXT"),
+    ("assignment_status", "skip_planning", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

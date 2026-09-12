@@ -419,6 +419,73 @@ async def test_assignments_completed_group_sorts_to_bottom(conn, settings):
         assert table.get_cell(row_keys[2], cols[2]) == "Done"
 
 
+async def test_assignments_skipped_group_sorts_between_upcoming_and_completed(conn, settings):
+    # The in-class case: a real test/quiz/lab, graded in person, that
+    # syncs in from Canvas like any other assignment but needs no home
+    # prep time — see docs/DESIGN.md.
+    _seed_course_and_assignment(conn, aid=1, name="NotDone", due="2099-01-01T00:00:00Z")
+    _seed_course_and_assignment(conn, aid=2, name="InClassTest", due="2099-02-01T00:00:00Z")
+    _seed_course_and_assignment(conn, aid=3, name="Done", due="2099-03-01T00:00:00Z")
+    from app.db.completion import set_completed, set_skip_planning
+
+    set_skip_planning(conn, 2)
+    set_completed(conn, 3)
+    app = StudyPlannerApp(settings=settings, conn=conn)
+    async with app.run_test() as pilot:
+        await _click_tab(pilot, "assignments-tab")
+        from textual.widgets import DataTable
+
+        table = app.query_one("#assignments-table", DataTable)
+        cols = list(table.columns.keys())
+        row_keys = list(table.rows.keys())
+        assert table.get_cell(row_keys[0], cols[2]) == "NotDone"
+        assert table.get_cell(row_keys[1], cols[2]).plain == "⊘ SKIPPED — in-class (1)"
+        assert table.get_cell(row_keys[2], cols[2]) == "InClassTest"
+        assert table.get_cell(row_keys[2], cols[5]) == "⊘"
+        assert table.get_cell(row_keys[3], cols[2]).plain == "✓ COMPLETED (1)"
+        assert table.get_cell(row_keys[4], cols[2]) == "Done"
+
+
+async def test_assignments_toggle_skip_removes_open_blocks_and_no_prompt(conn, settings):
+    _seed_course_and_assignment(conn, aid=1, name="InClassTest", due="2099-01-01T00:00:00Z")
+    conn.execute(
+        "INSERT INTO plan_blocks (date, start, end, kind, assignment_id, locked, completed, generated_at) "
+        "VALUES ('2026-01-01', '10:00', '10:45', 'assignment', 1, 0, 0, 't')"
+    )
+    conn.commit()
+    app = StudyPlannerApp(settings=settings, conn=conn)
+    async with app.run_test() as pilot:
+        await _click_tab(pilot, "assignments-tab")
+        from textual.widgets import DataTable, Static
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1  # no modal — skip needs no prompt
+
+        table = app.query_one("#assignments-table", DataTable)
+        cols = list(table.columns.keys())
+        row_keys = list(table.rows.keys())
+        assert table.get_cell(row_keys[0], cols[2]).plain.startswith("⊘ SKIPPED")
+
+        status = str(app.query_one("#assignments-status", Static).content)
+        assert "no longer be scheduled" in status.lower()
+        assert "removed 1 block" in status.lower()
+
+        from app.db.completion import is_skipped
+
+        assert is_skipped(conn, 1)
+        assert conn.execute("SELECT COUNT(*) c FROM plan_blocks").fetchone()["c"] == 0
+
+        # toggling again undoes it, without touching plan_blocks (nothing to remove)
+        table.move_cursor(row=1)
+        await pilot.press("s")
+        await pilot.pause()
+        assert not is_skipped(conn, 1)
+        row_keys = list(table.rows.keys())
+        cols = list(table.columns.keys())
+        assert table.get_cell(row_keys[0], cols[2]) == "InClassTest"
+
+
 async def test_assignments_no_upcoming_header_when_nothing_is_missing(conn, settings):
     # The boundary marker only earns its place when there's a MISSING
     # section it needs to be distinguished from — a plain upcoming-only

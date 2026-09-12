@@ -52,7 +52,7 @@ from rich.table import Table
 from app.config import get_settings
 from app.db.connection import connect as db_connect
 from app.db.completion import UnknownAssignmentError as UnknownAssignmentForCompletion
-from app.db.completion import set_completed
+from app.db.completion import set_completed, set_skip_planning
 from app.db.sessions import UnknownAssignmentError, log_session
 from app.db.sync import record_sync_run, sync_courses_and_assignments
 from app.ingest.canvas import CanvasClient
@@ -675,6 +675,45 @@ def complete(
         msg += " Run `plan` to regenerate without it."
     else:
         msg = f"[green]Marked {esc(result.assignment_name)} not done.[/]"
+    console.print(msg)
+
+
+@app.command()
+def skip(
+    assignment_id: int = typer.Argument(..., help="Assignment id — see `assignments --all`"),
+    undo: bool = typer.Option(False, "--undo", help="Stop skipping it — schedule it normally again"),
+) -> None:
+    """Exclude an assignment from planning — for in-class work (tests,
+    quizzes, labs graded in person) that syncs in from Canvas like any
+    other assignment but needs no home prep time.
+
+    Unlike `complete`, this doesn't mean you did it — just that `plan`
+    shouldn't block out study time for it. Removes any already-scheduled
+    open blocks for it immediately; `--undo` doesn't recreate them, run
+    `plan` to schedule it again.
+    """
+    settings = get_settings()
+    conn = db_connect(settings)
+    try:
+        result = set_skip_planning(conn, assignment_id, skip=not undo)
+    except UnknownAssignmentForCompletion:
+        console.print(
+            f"[red]No assignment with id {assignment_id}. "
+            "Run `assignments --all` to find it.[/]"
+        )
+        raise typer.Exit(1)
+    finally:
+        conn.close()
+
+    if result.skipped:
+        msg = f"[green]{esc(result.assignment_name)} will no longer be scheduled.[/]"
+        if result.blocks_removed:
+            msg += f" Removed {result.blocks_removed} scheduled block(s) for it."
+    else:
+        msg = (
+            f"[green]{esc(result.assignment_name)} will be scheduled normally again.[/] "
+            "Run `plan` to add it back."
+        )
     console.print(msg)
 
 

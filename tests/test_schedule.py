@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.db.completion import set_completed
+from app.db.completion import set_completed, set_skip_planning
 from app.db.connection import connect
 from app.planner.availability import set_weekly
 from app.planner.estimate import set_estimate
@@ -152,6 +152,32 @@ def test_undoing_completion_makes_it_schedulable_again(conn):
     set_estimate(conn, 1, 90)
     set_completed(conn, 1)
     set_completed(conn, 1, completed=False)
+
+    blocks, _ = _plan(conn, horizon_days=7)
+    assert len([b for b in blocks if b.assignment_id == 1]) == 2
+
+
+def test_skipped_assignment_excluded_from_plan(conn):
+    # The in-class case: a real Canvas assignment (a test/quiz graded in
+    # person) that needs no home prep time at all.
+    _weekdays(conn)
+    due = MONDAY + timedelta(days=3)
+    _insert_assignment(conn, 1, "Unit 3 Test", due.isoformat() + "T23:59:00Z", points=100)
+    set_estimate(conn, 1, 90)
+    set_skip_planning(conn, 1)
+
+    blocks, shortfalls = _plan(conn, horizon_days=7)
+    assert [b for b in blocks if b.assignment_id == 1] == []
+    assert shortfalls == []
+
+
+def test_undoing_skip_makes_it_schedulable_again(conn):
+    _weekdays(conn)
+    due = MONDAY + timedelta(days=3)
+    _insert_assignment(conn, 1, "Essay", due.isoformat() + "T23:59:00Z", points=90)
+    set_estimate(conn, 1, 90)
+    set_skip_planning(conn, 1)
+    set_skip_planning(conn, 1, skip=False)
 
     blocks, _ = _plan(conn, horizon_days=7)
     assert len([b for b in blocks if b.assignment_id == 1]) == 2

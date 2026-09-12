@@ -32,14 +32,17 @@ always-included digest rather than similarity search, since ranking by
 topical similarity has nothing to grab onto for a schedule question.
 `complete` marks a whole assignment done, independent of whether you
 ever logged time against it — `plan` then leaves it out entirely instead
-of scheduling it again. Verified against a real account, real
-assignments, and real files — not just unit tests. Step 6 (spaced
-review) is not built yet.
+of scheduling it again. `skip` is the other case: in-class work (tests,
+quizzes, labs graded in person) that syncs in from Canvas like any other
+assignment but needs no home prep time — unlike `complete`, it doesn't
+mean you did it, just that `plan` shouldn't block out time for it.
+Verified against a real account, real assignments, and real files — not
+just unit tests. Step 6 (spaced review) is not built yet.
 
 **Plus a TUI** (`asp tui`) — a dashboard, the full plan, per-assignment
-actions (estimate/complete/log), a persistent tutor chat, calibration,
-and availability settings, all in one interactive screen instead of
-separate one-shot commands. Login, cookie import/export, and material
+actions (estimate/complete/skip/log), a persistent tutor chat,
+calibration, and availability settings, all in one interactive screen
+instead of separate one-shot commands. Login, cookie import/export, and material
 upload stay CLI-only; they're one-shot browser/file operations, not
 naturally interactive ones.
 
@@ -81,6 +84,7 @@ python -m app.cli plan                                        # generate/regener
 python -m app.cli log <assignment_id> <minutes>   # what it actually took
 python -m app.cli calibration                     # see the learned pace multipliers
 python -m app.cli complete <assignment_id>         # mark it fully done; --undo to reverse
+python -m app.cli skip <assignment_id>             # in-class work, no home prep needed; --undo to reverse
 ```
 
 `login` needs a real display, so run it on your own machine. It stores
@@ -92,10 +96,17 @@ safety margin) into your availability, highest-priority first
 (points ÷ days-until-due), in fixed 45-minute blocks with one buffer
 block reserved per available day. Re-running it replaces the open plan;
 anything you've locked or marked complete is left alone, and any
-assignment you've marked done with `complete` is excluded entirely — not
-just its existing blocks, the assignment itself, so it never gets
-scheduled again. If it can't fit an assignment in before its deadline
-given everything else, it says so rather than silently dropping it.
+assignment you've marked done with `complete` or skipped with `skip` is
+excluded entirely — not just its existing blocks, the assignment itself,
+so it never gets scheduled again. `skip` is for in-class work Canvas
+still syncs in as an ordinary assignment (a test or quiz graded in
+person, not something you prep for at home) — a hint worth checking: on
+this account, Canvas assignments with `submission_types: ["none"]`
+turned out to almost always be exactly these in-class items, though
+that's not guaranteed for every account, so `skip` is a manual
+per-assignment call, not something `plan` infers on its own. If it can't
+fit an assignment in before its deadline given everything else, it says
+so rather than silently dropping it.
 
 `estimate-llm` needs a backend configured — `ASP_LLM_BACKEND` picks
 which, see `.env.example` for each one's settings:
@@ -191,15 +202,20 @@ Six tabs, `Tab`/`Shift+Tab` or click to switch, `q` to quit:
   changing availability.
 - **Assignments** — every published assignment, with its estimate and
   done/not-done status, grouped: overdue-and-not-done ("⚠ MISSING") at
-  the very top, the regular list in the middle, done work ("✓ COMPLETED")
-  out of the way at the bottom. Select a row: `c` toggles it done — like
-  a git commit, marking something done prompts for minutes spent first
-  (a number logs it as a real session in one step, same as `complete`
-  then `log`; blank marks done without logging; Escape cancels the whole
-  thing); undoing doesn't prompt. `e` prompts for a minutes estimate
-  (same as `estimate`), `l` prompts for actual minutes spent (same as
-  `log`). The prompts are a small reusable modal (`app/tui/modals.py`)
-  — Textual has no built-in input dialog.
+  the very top (with an "UPCOMING (n)" boundary marker right after it,
+  so it's never ambiguous where MISSING ends), the regular list next,
+  in-class work with nothing to prep at home ("⊘ SKIPPED — in-class")
+  after that, then done work ("✓ COMPLETED") out of the way at the
+  bottom. Select a row: `c` toggles it done — like a git commit, marking
+  something done prompts for minutes spent first (a number logs it as a
+  real session in one step, same as `complete` then `log`; blank marks
+  done without logging; Escape cancels the whole thing); undoing doesn't
+  prompt. `s` toggles skip (same as `skip`/`skip --undo`), no prompt
+  either way — there's nothing to log for something nobody studied for.
+  `e` prompts for a minutes estimate (same as `estimate`), `l` prompts
+  for actual minutes spent (same as `log`). The prompts are a small
+  reusable modal (`app/tui/modals.py`) — Textual has no built-in input
+  dialog.
 - **Tutor** — the same grounded, cited Q&A as `ask` (materials *and*
   assignment descriptions/due dates), but as a persistent conversation
   instead of one-shot calls: type a question, press Enter, the answer
@@ -322,9 +338,9 @@ app/
                         chunks_fts (FTS5 hybrid-search index, auto-synced)
     sync.py            diff-then-upsert; returns what changed
     sessions.py         log_session() — actual time + mark blocks done
-    completion.py        set_completed()/is_completed() — mark a whole
-                        assignment done, distinct from log_session()'s
-                        per-block completion
+    completion.py        set_completed()/is_completed() and
+                        set_skip_planning()/is_skipped() — two independent
+                        per-assignment flags: done vs. needs-no-home-prep
   planner/
     availability.py    weekly template + "mon-fri 16:00-19:00" parsing
     estimate.py        estimate priority chain (user > llm > default) + calibration
@@ -333,7 +349,7 @@ app/
                           each implementing estimate() and answer()
     calibration.py      live per-submission-type actual÷estimate multiplier
     schedule.py         generate_plan() — backward-fill into availability,
-                        excludes anything marked done via completion.py
+                        excludes anything completed or skipped via completion.py
   tutor/
     extract.py         per-format text extraction (pdf/pptx/docx/txt/md)
     chunk.py           chunk_text() — overlapping, word-boundary-safe
@@ -352,7 +368,8 @@ app/
   cli.py               login / login-cdp / export-cookies / import-cookies /
                         whoami / sync / assignments / availability /
                         estimate / estimate-llm / plan / log / complete /
-                        calibration / material add / material list / ask / tui
+                        skip / calibration / material add / material list /
+                        ask / tui
 docs/DESIGN.md         architecture and decisions
 tests/
 ```
